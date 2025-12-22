@@ -5,7 +5,8 @@ use knuffel::errors::DecodeError;
 use miette::{miette, IntoDiagnostic as _};
 use smithay::backend::renderer::Color32F;
 
-use crate::utils::{Flag, MergeWith};
+use crate::animations::{Animation, Curve, EasingParams, Kind, SpringParams};
+use crate::utils::{expect_only_children, parse_arg_node, Flag, MergeWith};
 use crate::FloatOrInt;
 
 pub const DEFAULT_BACKGROUND_COLOR: Color = Color::from_array_unpremul([0.25, 0.25, 0.25, 1.]);
@@ -1308,5 +1309,285 @@ mod tests {
         )
         "
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusAnimation {
+    pub enabled: bool,
+    pub anim: Animation,
+    pub scale: FocusScale,
+}
+
+impl Default for FocusAnimation {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            anim: Animation {
+                off: false,
+                kind: Kind::Easing(EasingParams {
+                    duration_ms: 200,
+                    curve: Curve::EaseOutQuad,
+                }),
+            },
+            scale: FocusScale::default(),
+        }
+    }
+}
+
+impl MergeWith<FocusAnimationPart> for FocusAnimation {
+    fn merge_with(&mut self, part: &FocusAnimationPart) {
+        if part.off {
+            self.enabled = false;
+        } else if part.on {
+            self.enabled = true;
+        }
+
+        if let Some(anim) = &part.anim {
+            self.anim = *anim;
+        }
+
+        if let Some(scale) = &part.scale {
+            self.scale.merge_with(scale);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusScale {
+    pub enabled: bool,
+    pub flash_scale: f32,
+    pub disable_on_solo: bool,
+}
+
+impl Default for FocusScale {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            flash_scale: 0.9,
+            disable_on_solo: false,
+        }
+    }
+}
+
+impl MergeWith<FocusScalePart> for FocusScale {
+    fn merge_with(&mut self, part: &FocusScalePart) {
+        if part.off {
+            self.enabled = false;
+        } else if part.on {
+            self.enabled = true;
+        }
+
+        if let Some(flash_scale) = part.flash_scale {
+            self.flash_scale = (flash_scale.0 as f32).clamp(0.0, 2.0);
+        }
+        if let Some(disable_on_solo) = part.disable_on_solo {
+            self.disable_on_solo = disable_on_solo.0;
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+pub struct FocusScalePart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub flash_scale: Option<FloatOrInt<0, 2>>,
+    #[knuffel(child)]
+    pub disable_on_solo: Option<Flag>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct FocusAnimationPart {
+    pub off: bool,
+    pub on: bool,
+    pub anim: Option<Animation>,
+    pub scale: Option<FocusScalePart>,
+}
+
+impl<S> knuffel::Decode<S> for FocusAnimationPart
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        use knuffel::traits::DecodeScalar;
+        expect_only_children(node, ctx);
+
+        let mut off = false;
+        let mut on = false;
+        let mut easing_params = None;
+        let mut spring_params = None;
+        let mut scale = None;
+
+        for child in node.children() {
+            match &**child.node_name {
+                "off" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    off = true;
+                }
+                "on" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    on = true;
+                }
+                "scale" => {
+                    scale = Some(FocusScalePart::decode_node(child, ctx)?);
+                }
+                "spring" => {
+                    let mut damping_ratio = None;
+                    let mut stiffness = None;
+                    let mut epsilon = None;
+                    for (name, val) in &child.properties {
+                        match &***name {
+                            "damping-ratio" => {
+                                damping_ratio = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            "stiffness" => {
+                                stiffness = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            "epsilon" => {
+                                epsilon = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            _ => (),
+                        }
+                    }
+                    let damping_ratio = damping_ratio.unwrap_or(0.5);
+                    let stiffness = stiffness.unwrap_or(800);
+                    let epsilon = epsilon.unwrap_or(0.0001);
+                    spring_params = Some(SpringParams {
+                        damping_ratio,
+                        stiffness,
+                        epsilon,
+                    });
+                }
+                "duration-ms" => {
+                    if easing_params.is_none() {
+                        easing_params = Some(EasingParams {
+                            duration_ms: 200,
+                            curve: Curve::EaseOutQuad,
+                        });
+                    }
+                    easing_params.as_mut().unwrap().duration_ms = parse_arg_node("duration-ms", child, ctx)?;
+                }
+                "curve" => {
+                    if easing_params.is_none() {
+                        easing_params = Some(EasingParams {
+                            duration_ms: 200,
+                            curve: Curve::EaseOutQuad,
+                        });
+                    }
+                    let mut iter_args = child.arguments.iter();
+                    let val = iter_args.next().ok_or_else(|| {
+                        DecodeError::missing(child, "additional argument `curve` is required")
+                    })?;
+                    let animation_curve_string: String = DecodeScalar::decode(val, ctx)?;
+
+                    let animation_curve = match animation_curve_string.as_str() {
+                        "linear" => Curve::Linear,
+                        "ease-out-quad" => Curve::EaseOutQuad,
+                        "ease-out-cubic" => Curve::EaseOutCubic,
+                        "ease-out-expo" => Curve::EaseOutExpo,
+                        "cubic-bezier" => {
+                            let x1: FloatOrInt<0, 1> = DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let y1: FloatOrInt<{ i32::MIN }, { i32::MAX }> = DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let x2: FloatOrInt<0, 1> = DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let y2: FloatOrInt<{ i32::MIN }, { i32::MAX }> = DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            Curve::CubicBezier(x1.0, y1.0, x2.0, y2.0)
+                        }
+                        _ => Curve::EaseOutQuad,
+                    };
+                    easing_params.as_mut().unwrap().curve = animation_curve;
+                }
+                _ => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        child,
+                        "node",
+                        format!("unexpected node `{}`", child.node_name.escape_default()),
+                    ));
+                }
+            }
+        }
+
+        let anim = if let Some(p) = spring_params {
+            Some(Animation { off: false, kind: Kind::Spring(p) })
+        } else {
+            easing_params.map(|p| Animation { off: false, kind: Kind::Easing(p) })
+        };
+
+        Ok(Self {
+            off,
+            on,
+            anim,
+            scale,
+        })
+    }
+}
+
+#[cfg(test)]
+mod focus_animation_tests {
+    use super::*;
+
+    #[test]
+    fn focus_animation_parsing() {
+        let config = r#"
+            focus-animation {
+                on
+                duration-ms 300
+                scale {
+                    on
+                    flash-scale 0.9
+                }
+            }
+        "#;
+        let parsed: FocusAnimationPart = knuffel::parse("test", config).unwrap();
+        assert!(parsed.on);
+        
+        let anim = parsed.anim.unwrap();
+        if let Kind::Easing(p) = anim.kind {
+            assert_eq!(p.duration_ms, 300);
+        } else {
+            panic!("Expected easing");
+        }
+
+        let scale = parsed.scale.unwrap();
+        assert!(scale.on);
+        assert_eq!(scale.flash_scale.unwrap().0, 0.9);
+
+        let mut animation = FocusAnimation::default();
+        animation.merge_with(&parsed);
+        assert!(animation.enabled);
+        if let Kind::Easing(p) = animation.anim.kind {
+            assert_eq!(p.duration_ms, 300);
+        }
+        assert!(animation.scale.enabled);
+        assert_eq!(animation.scale.flash_scale, 0.9);
+    }
+
+    #[test]
+    fn focus_animation_spring_parsing() {
+        let config = r#"
+            focus-animation {
+                on
+                spring damping-ratio=0.5 stiffness=800 epsilon=0.0001
+                scale {
+                    on
+                    flash-scale 0.95
+                }
+            }
+        "#;
+        let parsed: FocusAnimationPart = knuffel::parse("test", config).unwrap();
+        assert!(parsed.on);
+        
+        let anim = parsed.anim.unwrap();
+        if let Kind::Spring(p) = anim.kind {
+            assert_eq!(p.damping_ratio, 0.5);
+            assert_eq!(p.stiffness, 800);
+        } else {
+            panic!("Expected spring");
+        }
     }
 }

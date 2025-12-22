@@ -1166,17 +1166,24 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
         let active = self.active_window_id.clone();
-        for tile in &mut self.tiles {
-            let win = tile.window_mut();
+        let is_solo_window = self.options.layout.focus_animation.enabled
+            && self.options.layout.focus_animation.scale.enabled
+            && self.tiles.len() == 1;
 
+        for tile in &mut self.tiles {
+            let mut is_tile_active = is_active && Some(tile.window().id()) == active.as_ref();
+            if self.options.deactivate_unfocused_windows {
+                is_tile_active &= is_focused;
+            }
+
+            let is_focused_now = is_tile_active && is_focused;
+
+            tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window);
+
+            let win = tile.window_mut();
             win.set_active_in_column(true);
             win.set_floating(true);
-
-            let mut is_active = is_active && Some(win.id()) == active.as_ref();
-            if self.options.deactivate_unfocused_windows {
-                is_active &= is_focused;
-            }
-            win.set_activated(is_active);
+            win.set_activated(is_tile_active);
 
             let resize_data = self
                 .interactive_resize

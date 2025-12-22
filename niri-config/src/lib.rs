@@ -1393,6 +1393,15 @@ mod tests {
                         },
                     ),
                 },
+                focus_animation: FocusAnimation {
+                    enabled: false,
+                    duration_ms: 200,
+                    scale: FocusScale {
+                        enabled: false,
+                        flash_scale: 0.9,
+                        disable_on_solo: false,
+                    },
+                },
                 preset_column_widths: [
                     Proportion(
                         0.25,

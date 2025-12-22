@@ -4,6 +4,9 @@ use std::rc::Rc;
 use niri_config::utils::MergeWith as _;
 use niri_config::{Color, CornerRadius, GradientInterpolation};
 use niri_ipc::WindowLayout;
+use smithay::backend::renderer::element::utils::{
+    Relocate, RelocateRenderElement, RescaleRenderElement,
+};
 use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 
@@ -97,6 +100,15 @@ pub struct Tile<W: LayoutElement> {
     /// The animation of the tile's opacity.
     pub(super) alpha_animation: Option<AlphaAnimation>,
 
+    /// The animation of the tile's scale.
+    pub(super) scale_animation: Option<ScaleAnimation>,
+
+    /// Whether the window was focused during the last render update.
+    pub(super) was_focused: bool,
+
+    /// State machine for focus animations.
+    focus_animation_state: FocusAnimationState,
+
     /// Offset during the initial interactive move rubberband.
     pub(super) interactive_move_offset: Point<f64, Logical>,
 
@@ -133,6 +145,7 @@ niri_render_elements! {
         Blur = BlurRenderElement,
         ClippedSurface = ClippedSurfaceRenderElement<R>,
         Offscreen = OffscreenRenderElement,
+        Scale = RelocateRenderElement<RescaleRenderElement<OffscreenRenderElement>>,
         ExtraDamage = ExtraDamage,
     }
 }
@@ -175,6 +188,28 @@ pub(super) struct AlphaAnimation {
     offscreen: OffscreenBuffer,
 }
 
+#[derive(Debug)]
+pub(super) struct ScaleAnimation {
+    pub(super) anim: Animation,
+    offscreen: OffscreenBuffer,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum FocusAnimationState {
+    #[default]
+    Idle,
+    /// The window is performing a focus animation effect.
+    Flashing {
+        phase: FlashPhase,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FlashPhase {
+    Shrinking,
+    Expanding,
+}
+
 impl<W: LayoutElement> Tile<W> {
     pub fn new(
         window: W,
@@ -206,6 +241,9 @@ impl<W: LayoutElement> Tile<W> {
             move_x_animation: None,
             move_y_animation: None,
             alpha_animation: None,
+            scale_animation: None,
+            was_focused: false,
+            focus_animation_state: FocusAnimationState::Idle,
             interactive_move_offset: Point::from((0., 0.)),
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
@@ -439,6 +477,12 @@ impl<W: LayoutElement> Tile<W> {
                 self.alpha_animation = None;
             }
         }
+
+        if let Some(scale) = &mut self.scale_animation {
+            if scale.anim.is_done() {
+                self.scale_animation = None;
+            }
+        }
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
@@ -454,6 +498,11 @@ impl<W: LayoutElement> Tile<W> {
                 .alpha_animation
                 .as_ref()
                 .is_some_and(|alpha| !alpha.anim.is_done())
+            || self
+                .scale_animation
+                .as_ref()
+                .is_some_and(|scale| !scale.anim.is_done())
+            || !matches!(self.focus_animation_state, FocusAnimationState::Idle)
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
@@ -636,6 +685,122 @@ impl<W: LayoutElement> Tile<W> {
             hold_after_done: false,
             offscreen,
         });
+    }
+
+    pub fn animate_scale(&mut self, from: f64, to: f64, config: niri_config::Animation) {
+        let (current, offscreen) = if let Some(scale) = self.scale_animation.take() {
+            (scale.anim.value(), scale.offscreen)
+        } else {
+            (from, OffscreenBuffer::default())
+        };
+
+        self.scale_animation = Some(ScaleAnimation {
+            anim: Animation::new(self.clock.clone(), current, to, 0., config),
+            offscreen,
+        });
+    }
+
+    pub fn update_focus_animation(
+        &mut self,
+        layout_config: &niri_config::Layout,
+        is_focused: bool,
+        is_solo_window: bool,
+    ) {
+        let focus_config = &layout_config.focus_animation;
+        let scale_config = &focus_config.scale;
+
+        // 1. Check for Focus Animation Trigger
+        let animation_enabled = focus_config.enabled
+            && scale_config.enabled
+            && !(is_solo_window && scale_config.disable_on_solo);
+
+        if is_focused && !self.was_focused && animation_enabled {
+            let target_scale = scale_config.flash_scale.clamp(0.0, 2.0) as f64;
+
+            let shrink_config = match focus_config.anim.kind {
+                niri_config::animations::Kind::Easing(p) => {
+                    let duration = p.duration_ms.div_ceil(2);
+                    niri_config::Animation {
+                        off: false,
+                        kind: niri_config::animations::Kind::Easing(
+                            niri_config::animations::EasingParams {
+                                duration_ms: duration.max(1),
+                                curve: p.curve,
+                            },
+                        ),
+                    }
+                }
+                niri_config::animations::Kind::Spring(_) => {
+                    // Fast shrink for spring
+                    niri_config::Animation {
+                        off: false,
+                        kind: niri_config::animations::Kind::Easing(
+                            niri_config::animations::EasingParams {
+                                duration_ms: 50,
+                                curve: niri_config::animations::Curve::EaseOutQuad,
+                            },
+                        ),
+                    }
+                }
+            };
+
+            // Start Animation
+            self.focus_animation_state = FocusAnimationState::Flashing {
+                phase: FlashPhase::Shrinking,
+            };
+            self.animate_scale(1.0, target_scale, shrink_config);
+            self.was_focused = true;
+            return;
+        }
+        self.was_focused = is_focused;
+
+        // 2. Handle Existing Animation State
+        match self.focus_animation_state {
+            FocusAnimationState::Flashing { phase } => {
+                if let Some(scale) = &self.scale_animation {
+                    if scale.anim.is_done() {
+                        match phase {
+                            FlashPhase::Shrinking => {
+                                // Shrinking done -> Switch to Expanding
+                                let expand_config = match focus_config.anim.kind {
+                                    niri_config::animations::Kind::Easing(p) => {
+                                        let duration = p
+                                            .duration_ms
+                                            .saturating_sub(p.duration_ms.div_ceil(2));
+                                        niri_config::Animation {
+                                            off: false,
+                                            kind: niri_config::animations::Kind::Easing(
+                                                niri_config::animations::EasingParams {
+                                                    duration_ms: duration.max(1),
+                                                    curve: p.curve,
+                                                },
+                                            ),
+                                        }
+                                    }
+                                    niri_config::animations::Kind::Spring(p) => {
+                                        niri_config::Animation {
+                                            off: false,
+                                            kind: niri_config::animations::Kind::Spring(p),
+                                        }
+                                    }
+                                };
+                                self.focus_animation_state = FocusAnimationState::Flashing {
+                                    phase: FlashPhase::Expanding,
+                                };
+                                self.animate_scale(scale.anim.value(), 1.0, expand_config);
+                            }
+                            FlashPhase::Expanding => {
+                                // Expanding done -> Animation complete
+                                self.focus_animation_state = FocusAnimationState::Idle;
+                            }
+                        }
+                    }
+                } else {
+                    self.focus_animation_state = FocusAnimationState::Idle;
+                }
+            }
+            FocusAnimationState::Idle => (),
+        }
     }
 
     pub fn ensure_alpha_animates_to_1(&mut self) {
@@ -1343,6 +1508,7 @@ impl<W: LayoutElement> Tile<W> {
 
         let mut open_anim_elem = None;
         let mut alpha_anim_elem = None;
+        let mut scale_anim_elem = None;
         let mut window_elems = None;
 
         self.window().set_offscreen_data(None);
@@ -1385,15 +1551,45 @@ impl<W: LayoutElement> Tile<W> {
                     warn!("error rendering tile to offscreen for alpha animation: {err:?}");
                 }
             }
+        } else if let Some(scale_anim) = &self.scale_animation {
+            let renderer = renderer.as_gles_renderer();
+            let elements =
+                self.render_inner(renderer, Point::from((0., 0.)), focus_ring, target, output);
+            let elements = elements.collect::<Vec<TileRenderElement<_>>>();
+            match scale_anim.offscreen.render(renderer, scale, &elements) {
+                Ok((elem, _sync, data)) => {
+                    let progress = scale_anim.anim.value();
+                    let center = self.animated_tile_size().to_point().downscale(2.);
+
+                    let elem = RescaleRenderElement::from_element(
+                        elem,
+                        center.to_physical_precise_round(scale),
+                        progress,
+                    );
+
+                    let elem = RelocateRenderElement::from_element(
+                        elem,
+                        location.to_physical_precise_round(scale),
+                        Relocate::Relative,
+                    );
+
+                    self.window().set_offscreen_data(Some(data));
+                    scale_anim_elem = Some(elem.into());
+                }
+                Err(err) => {
+                    warn!("error rendering tile to offscreen for scale animation: {err:?}");
+                }
+            }
         }
 
-        if open_anim_elem.is_none() && alpha_anim_elem.is_none() {
+        if open_anim_elem.is_none() && alpha_anim_elem.is_none() && scale_anim_elem.is_none() {
             window_elems = Some(self.render_inner(renderer, location, focus_ring, target, output));
         }
 
         open_anim_elem
             .into_iter()
             .chain(alpha_anim_elem)
+            .chain(scale_anim_elem)
             .chain(window_elems.into_iter().flatten())
     }
 

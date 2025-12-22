@@ -3625,6 +3625,11 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+        let is_solo_window = self.options.layout.focus_animation.enabled
+            && self.options.layout.focus_animation.scale.enabled
+            && self.columns.len() == 1
+            && self.columns.first().is_some_and(|c| c.tiles.len() == 1);
+
         for (col_idx, col) in self.columns.iter_mut().enumerate() {
             let mut col_resize_data = None;
             if let Some(resize) = &self.interactive_resize {
@@ -3663,11 +3668,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             };
 
             for (tile_idx, tile) in col.tiles.iter_mut().enumerate() {
-                let win = tile.window_mut();
-
                 let active_in_column = col.active_tile_idx == tile_idx;
-                win.set_active_in_column(active_in_column);
-                win.set_floating(false);
 
                 let mut active = is_active && self.active_column_idx == col_idx;
                 if self.options.deactivate_unfocused_windows {
@@ -3677,6 +3678,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     // animations when switching tabs.
                     active &= active_in_column || is_tabbed;
                 }
+
+                let is_focused_now = active && is_focused;
+                tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window);
+
+                let win = tile.window_mut();
+                win.set_active_in_column(active_in_column);
+                win.set_floating(false);
                 win.set_activated(active);
 
                 win.set_interactive_resize(col_resize_data);
