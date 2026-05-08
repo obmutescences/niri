@@ -249,6 +249,29 @@ layout {
         color "#0007"
     }
 
+    // Focus animation settings.
+    focus-animation {
+        // Uncomment this line to enable focus animation.
+        // on
+
+        // Animation configuration for the focus animation.
+        // Supports easing (duration-ms + curve) or spring.
+        // duration-ms 200
+        // spring damping-ratio=0.5 stiffness=800 epsilon=0.0001
+
+        scale {
+            // Uncomment this line to enable scale flash.
+            // on
+
+            // Scale factor to flash to when window gains focus.
+            // 1.0 is normal size, < 1.0 is shrinking, > 1.0 is expanding.
+            flash-scale 0.95
+
+            // Disable focus animation when there's only one window.
+            disable-on-solo true
+        }
+    }
+
     // Struts shrink the area occupied by windows, similarly to layer-shell panels.
     // You can think of them as a kind of outer gaps. They are set in logical pixels.
     // Left and right struts will cause the next window to the side to always be visible.

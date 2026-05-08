@@ -2,18 +2,24 @@ use knuffel::errors::DecodeError;
 use niri_ipc::{ColumnDisplay, SizeChange};
 
 use crate::appearance::{
-    Border, FocusRing, InsertHint, Shadow, TabIndicator, DEFAULT_BACKGROUND_COLOR,
+    Blur, Border, FocusAnimation, FocusRing, InsertHint, Shadow, TabIndicator,
+    DEFAULT_BACKGROUND_COLOR,
 };
 use crate::utils::{expect_only_children, Flag, MergeWith};
-use crate::{BorderRule, Color, FloatOrInt, InsertHintPart, ShadowRule, TabIndicatorPart};
+use crate::{
+    BlurPart, BorderRule, Color, FloatOrInt, FocusAnimationPart, FocusScalePart, InsertHintPart,
+    ShadowRule, TabIndicatorPart,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
     pub focus_ring: FocusRing,
     pub border: Border,
+    pub blur: Blur,
     pub shadow: Shadow,
     pub tab_indicator: TabIndicator,
     pub insert_hint: InsertHint,
+    pub focus_animation: FocusAnimation,
     pub preset_column_widths: Vec<PresetSize>,
     pub default_column_width: Option<PresetSize>,
     pub preset_window_heights: Vec<PresetSize>,
@@ -31,9 +37,11 @@ impl Default for Layout {
         Self {
             focus_ring: FocusRing::default(),
             border: Border::default(),
+            blur: Default::default(),
             shadow: Shadow::default(),
             tab_indicator: TabIndicator::default(),
             insert_hint: InsertHint::default(),
+            focus_animation: FocusAnimation::default(),
             preset_column_widths: vec![
                 PresetSize::Proportion(1. / 3.),
                 PresetSize::Proportion(0.5),
@@ -62,6 +70,7 @@ impl MergeWith<LayoutPart> for Layout {
             (self, part),
             focus_ring,
             border,
+            blur,
             shadow,
             tab_indicator,
             insert_hint,
@@ -69,6 +78,14 @@ impl MergeWith<LayoutPart> for Layout {
             empty_workspace_above_first,
             gaps,
         );
+
+        if let Some(focus_scale) = &part.focus_scale {
+            self.focus_animation.scale.merge_with(focus_scale);
+        }
+
+        if let Some(focus_animation) = &part.focus_animation {
+            self.focus_animation.merge_with(focus_animation);
+        }
 
         merge_clone!(
             (self, part),
@@ -101,11 +118,17 @@ pub struct LayoutPart {
     #[knuffel(child)]
     pub border: Option<BorderRule>,
     #[knuffel(child)]
+    pub blur: Option<BlurPart>,
+    #[knuffel(child)]
     pub shadow: Option<ShadowRule>,
     #[knuffel(child)]
     pub tab_indicator: Option<TabIndicatorPart>,
     #[knuffel(child)]
     pub insert_hint: Option<InsertHintPart>,
+    #[knuffel(child)]
+    pub focus_scale: Option<FocusScalePart>,
+    #[knuffel(child)]
+    pub focus_animation: Option<FocusAnimationPart>,
     #[knuffel(child, unwrap(children))]
     pub preset_column_widths: Option<Vec<PresetSize>>,
     #[knuffel(child)]

@@ -22,4 +22,3 @@ void main() {
     niri_v_coords = (tex_matrix * position).xy;
     gl_Position = vec4(matrix * position, 1.0);
 }
-

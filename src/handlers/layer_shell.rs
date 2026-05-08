@@ -22,7 +22,7 @@ impl WlrLayerShellHandler for State {
         &mut self,
         surface: WlrLayerSurface,
         wl_output: Option<WlOutput>,
-        _layer: Layer,
+        _wlr_layer: Layer,
         namespace: String,
     ) {
         let output = if let Some(wl_output) = &wl_output {
@@ -60,6 +60,7 @@ impl WlrLayerShellHandler for State {
             }) {
             map.unmap_layer(&layer);
             self.niri.mapped_layer_surfaces.remove(&layer);
+
             Some(output)
         } else {
             None

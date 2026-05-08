@@ -832,7 +832,6 @@ impl Tty {
             let gles_renderer = renderer.as_gles_renderer();
             resources::init(gles_renderer);
             shaders::init(gles_renderer);
-
             let config = self.config.borrow();
             if let Some(src) = config.animations.window_resize.custom_shader.as_deref() {
                 shaders::set_custom_resize_program(gles_renderer, Some(src));
@@ -1393,6 +1392,7 @@ impl Tty {
 
         let render_node = device.render_node.unwrap_or(self.primary_render_node);
         let renderer = self.gpu_manager.single_renderer(&render_node)?;
+
         let egl_context = renderer.as_ref().egl_context();
         let render_formats = egl_context.dmabuf_render_formats();
 
