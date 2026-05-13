@@ -1195,6 +1195,7 @@ impl<W: LayoutElement> Tile<W> {
         location: Point<f64, Logical>,
         mut xray_pos: XrayPos,
         focus_ring: bool,
+        force_background_xray: bool,
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render_inner");
@@ -1478,6 +1479,7 @@ impl<W: LayoutElement> Tile<W> {
             surface_anim_scale,
             radius,
             xray_pos,
+            force_background_xray,
             &mut |elem| push(elem.into()),
         );
     }
@@ -1510,6 +1512,7 @@ impl<W: LayoutElement> Tile<W> {
                 Point::new(0., 0.),
                 xray_pos,
                 focus_ring,
+                false,
                 &mut |elem| elements.push(elem),
             );
             match open.render(
@@ -1537,6 +1540,7 @@ impl<W: LayoutElement> Tile<W> {
                 Point::new(0., 0.),
                 xray_pos,
                 focus_ring,
+                false,
                 &mut |elem| elements.push(elem),
             );
             match alpha.offscreen.render(ctx.renderer, scale, &elements) {
@@ -1560,6 +1564,7 @@ impl<W: LayoutElement> Tile<W> {
                 Point::new(0., 0.),
                 xray_pos,
                 focus_ring,
+                true,
                 &mut |elem| elements.push(elem),
             );
             match scale_anim.offscreen.render(ctx.renderer, scale, &elements) {
@@ -1590,7 +1595,9 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         if !pushed {
-            self.render_inner(ctx, location, xray_pos, focus_ring, &mut |elem| push(elem));
+            self.render_inner(ctx, location, xray_pos, focus_ring, false, &mut |elem| {
+                push(elem)
+            });
         }
     }
 

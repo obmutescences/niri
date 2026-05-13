@@ -209,6 +209,7 @@ pub trait LayoutElement {
         _surface_anim_scale: Scale<f64>,
         _radius: CornerRadius,
         _xray_pos: XrayPos,
+        _force_xray: bool,
         _push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
     }

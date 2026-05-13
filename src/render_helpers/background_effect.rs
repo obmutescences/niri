@@ -261,6 +261,22 @@ fn render_params_for_tile(
     })
 }
 
+fn effect_options_are_visible(
+    effect: niri_config::BackgroundEffect,
+    has_blur_region: bool,
+) -> bool {
+    let blur = if has_blur_region {
+        effect.blur != Some(false)
+    } else {
+        effect.blur == Some(true)
+    };
+
+    effect.xray == Some(true)
+        || blur
+        || effect.noise.is_some_and(|x| x > 0.)
+        || effect.saturation.is_some_and(|x| x != 1.)
+}
+
 /// Per-surface background effect stored in its data map.
 struct SurfaceBackgroundEffect(Mutex<BackgroundEffect>);
 
@@ -292,7 +308,8 @@ pub fn render_for_tile(
     surface_anim_scale: Scale<f64>,
     blur_config: niri_config::Blur,
     radius: CornerRadius,
-    effect: niri_config::BackgroundEffect,
+    mut effect: niri_config::BackgroundEffect,
+    force_xray: bool,
     should_block_out: bool,
     xray_pos: XrayPos,
     push: &mut dyn FnMut(BackgroundEffectElement),
@@ -303,6 +320,15 @@ pub fn render_for_tile(
 
         let blur_region = get_cached_blur_region(states);
         let has_blur_region = blur_region.as_ref().is_some_and(|r| !r.is_empty());
+
+        if force_xray
+            && effect.xray == Some(false)
+            && effect_options_are_visible(effect, has_blur_region)
+        {
+            // Non-xray effects capture the current framebuffer, which is transparent while a
+            // whole tile is being rendered to an offscreen buffer for the focus scale animation.
+            effect.xray = Some(true);
+        }
 
         background_effect.update_config(blur_config);
         background_effect.update_render_elements(radius, effect, has_blur_region);
