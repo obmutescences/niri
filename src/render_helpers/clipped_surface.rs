@@ -96,6 +96,20 @@ impl<R: NiriRenderer> ClippedSurfaceRenderElement<R> {
             Uniform::new("geo_size", geo_size),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", input_to_geo),
+            Uniform::new("lg_refraction_strength", 0.0f32),
+            Uniform::new("lg_power_factor", 0.0f32),
+            Uniform::new("lg_refraction_a", 0.0f32),
+            Uniform::new("lg_refraction_b", 0.0f32),
+            Uniform::new("lg_refraction_c", 0.0f32),
+            Uniform::new("lg_refraction_d", 0.0f32),
+            Uniform::new("lg_refraction_power", 0.0f32),
+            Uniform::new("lg_physical_refraction", 0.0f32),
+            Uniform::new("lg_glow_weight", 0.0f32),
+            Uniform::new("lg_glow_bias", 0.0f32),
+            Uniform::new("lg_glow_edge0", 0.0f32),
+            Uniform::new("lg_glow_edge1", 0.0f32),
+            Uniform::new("lg_edge_lighting", 1.0f32),
+            Uniform::new("lg_fringing", 0.3f32),
         ]
     }
 

@@ -1903,6 +1903,7 @@ mod tests {
                         blur: None,
                         noise: None,
                         saturation: None,
+                        liquid_glass: None,
                     },
                     popups: PopupsRule {
                         opacity: None,
@@ -1912,6 +1913,7 @@ mod tests {
                             blur: None,
                             noise: None,
                             saturation: None,
+                            liquid_glass: None,
                         },
                     },
                 },
@@ -1954,6 +1956,7 @@ mod tests {
                         blur: None,
                         noise: None,
                         saturation: None,
+                        liquid_glass: None,
                     },
                     popups: PopupsRule {
                         opacity: None,
@@ -1963,6 +1966,7 @@ mod tests {
                             blur: None,
                             noise: None,
                             saturation: None,
+                            liquid_glass: None,
                         },
                     },
                 },
@@ -2482,6 +2486,11 @@ mod tests {
         +            ],
         +        },
         +    ],
+
+        -                flash_scale: 0.9,
+        -                disable_on_solo: false,
+        +                flash_scale: 0.95,
+        +                disable_on_solo: true,
 
         -                0.3333333333333333,
         +                0.33333,

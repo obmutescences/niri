@@ -16,6 +16,7 @@ use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Transform};
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 use crate::render_helpers::background_effect::RenderParams;
 use crate::render_helpers::blur::{Blur, BlurOptions};
+use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
 use crate::utils::region::TransformedRegion;
@@ -38,6 +39,7 @@ pub struct FramebufferEffectElement {
     blur_options: Option<BlurOptions>,
     noise: f32,
     saturation: f32,
+    liquid_glass: Option<LiquidGlassOptions>,
 }
 
 #[derive(Debug)]
@@ -68,6 +70,7 @@ impl FramebufferEffect {
         blur_options: Option<BlurOptions>,
         noise: f32,
         saturation: f32,
+        liquid_glass: Option<LiquidGlassOptions>,
     ) -> FramebufferEffectElement {
         let (clip_geo, corner_radius) = params
             .clip
@@ -89,6 +92,7 @@ impl FramebufferEffect {
             blur_options,
             noise,
             saturation,
+            liquid_glass,
         }
     }
 }
@@ -98,7 +102,7 @@ impl FramebufferEffectElement {
         &self,
         crop: Rectangle<f64, Logical>,
         transform: Transform,
-    ) -> [Uniform<'static>; 7] {
+    ) -> Vec<Uniform<'static>> {
         let offset = crop.loc - (self.clip_geo.loc - self.geometry.loc);
         let offset = Vec2::new(offset.x as f32, offset.y as f32);
         let crop_size = Vec2::new(crop.size.w as f32, crop.size.h as f32);
@@ -116,7 +120,7 @@ impl FramebufferEffectElement {
 
         let clip_geo_size = (self.clip_geo.size.w as f32, self.clip_geo.size.h as f32);
 
-        [
+        let mut uniforms = vec![
             Uniform::new("niri_scale", self.scale),
             Uniform::new("geo_size", clip_geo_size),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
@@ -124,8 +128,35 @@ impl FramebufferEffectElement {
             Uniform::new("noise", self.noise),
             Uniform::new("saturation", self.saturation),
             Uniform::new("bg_color", [0f32, 0., 0., 0.]),
-        ]
+        ];
+
+        extend_liquid_glass_uniforms(&mut uniforms, self.liquid_glass);
+
+        uniforms
     }
+}
+
+fn extend_liquid_glass_uniforms(
+    uniforms: &mut Vec<Uniform<'static>>,
+    liquid_glass: Option<LiquidGlassOptions>,
+) {
+    let lg = liquid_glass.unwrap_or_default();
+    uniforms.extend([
+        Uniform::new("lg_refraction_strength", lg.refraction_strength as f32),
+        Uniform::new("lg_power_factor", lg.power_factor as f32),
+        Uniform::new("lg_refraction_a", lg.refraction_a as f32),
+        Uniform::new("lg_refraction_b", lg.refraction_b as f32),
+        Uniform::new("lg_refraction_c", lg.refraction_c as f32),
+        Uniform::new("lg_refraction_d", lg.refraction_d as f32),
+        Uniform::new("lg_refraction_power", lg.refraction_power as f32),
+        Uniform::new("lg_physical_refraction", 0.0f32),
+        Uniform::new("lg_glow_weight", lg.glow_weight as f32),
+        Uniform::new("lg_glow_bias", lg.glow_bias as f32),
+        Uniform::new("lg_glow_edge0", lg.glow_edge0 as f32),
+        Uniform::new("lg_glow_edge1", lg.glow_edge1 as f32),
+        Uniform::new("lg_edge_lighting", 1.0f32),
+        Uniform::new("lg_fringing", 0.3f32),
+    ]);
 }
 
 impl Element for FramebufferEffectElement {

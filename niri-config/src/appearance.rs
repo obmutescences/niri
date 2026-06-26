@@ -389,6 +389,84 @@ impl MergeWith<BlurPart> for Blur {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiquidGlass {
+    pub refraction_strength: f64,
+    pub power_factor: f64,
+    pub refraction_a: f64,
+    pub refraction_b: f64,
+    pub refraction_c: f64,
+    pub refraction_d: f64,
+    pub refraction_power: f64,
+    pub glow_weight: f64,
+    pub glow_bias: f64,
+    pub glow_edge0: f64,
+    pub glow_edge1: f64,
+}
+
+impl Default for LiquidGlass {
+    fn default() -> Self {
+        Self {
+            refraction_strength: 1.0,
+            power_factor: 3.0,
+            refraction_a: 0.04,
+            refraction_b: 5.0,
+            refraction_c: 5.0,
+            refraction_d: 8.0,
+            refraction_power: 0.6,
+            glow_weight: 0.08,
+            glow_bias: 0.0,
+            glow_edge0: 0.3,
+            glow_edge1: 0.9,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+pub struct LiquidGlassPart {
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_strength: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub power_factor: Option<FloatOrInt<1, 10>>,
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_a: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_b: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_c: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_d: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub refraction_power: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub glow_weight: Option<FloatOrInt<-100, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub glow_bias: Option<FloatOrInt<-100, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub glow_edge0: Option<FloatOrInt<-100, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub glow_edge1: Option<FloatOrInt<-100, 100>>,
+}
+
+impl MergeWith<LiquidGlassPart> for LiquidGlass {
+    fn merge_with(&mut self, part: &LiquidGlassPart) {
+        merge!(
+            (self, part),
+            refraction_strength,
+            power_factor,
+            refraction_a,
+            refraction_b,
+            refraction_c,
+            refraction_d,
+            refraction_power,
+            glow_weight,
+            glow_bias,
+            glow_edge0,
+            glow_edge1,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shadow {
     pub on: bool,
     pub offset: ShadowOffset,
@@ -1066,6 +1144,8 @@ pub struct BackgroundEffectRule {
     pub noise: Option<FloatOrInt<0, 1000>>,
     #[knuffel(child, unwrap(argument))]
     pub saturation: Option<FloatOrInt<0, 1000>>,
+    #[knuffel(child)]
+    pub liquid_glass: Option<LiquidGlassPart>,
 }
 
 /// Resolved background effect rule.
@@ -1088,6 +1168,7 @@ pub struct BackgroundEffect {
 
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
+    pub liquid_glass: Option<LiquidGlass>,
 }
 
 impl MergeWith<BackgroundEffectRule> for BackgroundEffect {
@@ -1100,6 +1181,11 @@ impl MergeWith<BackgroundEffectRule> for BackgroundEffect {
 
         if let Some(x) = part.saturation {
             self.saturation = Some(x.0);
+        }
+
+        if let Some(lg) = &part.liquid_glass {
+            let entry = self.liquid_glass.get_or_insert(LiquidGlass::default());
+            entry.merge_with(lg);
         }
     }
 }
@@ -1350,6 +1436,30 @@ mod tests {
         "
         );
     }
+
+    #[test]
+    fn parse_liquid_glass() {
+        let config = Config::parse_mem(
+            r#"
+            window-rule {
+                match app-id="^test$"
+                background-effect {
+                    xray true
+                    liquid-glass {
+                        refraction-strength 1.0
+                        power-factor 3.0
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let rule = &config.window_rules[0];
+        let lg = rule.background_effect.liquid_glass.unwrap();
+        assert_eq!(lg.refraction_strength, Some(FloatOrInt(1.0)));
+        assert_eq!(lg.power_factor, Some(FloatOrInt(3.0)));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1585,34 +1695,24 @@ mod focus_animation_tests {
     #[test]
     fn focus_animation_parsing() {
         let config = r#"
-            focus-animation {
-                on
-                duration-ms 300
-                scale {
+            layout {
+                focus-animation {
                     on
-                    flash-scale 0.9
+                    duration-ms 300
+                    scale {
+                        on
+                        flash-scale 0.9
+                    }
                 }
             }
         "#;
-        let parsed: FocusAnimationPart = knuffel::parse("test", config).unwrap();
-        assert!(parsed.on);
-
-        let anim = parsed.anim.unwrap();
-        if let Kind::Easing(p) = anim.kind {
-            assert_eq!(p.duration_ms, 300);
-        } else {
-            panic!("Expected easing");
-        }
-
-        let scale = parsed.scale.unwrap();
-        assert!(scale.on);
-        assert_eq!(scale.flash_scale.unwrap().0, 0.9);
-
-        let mut animation = FocusAnimation::default();
-        animation.merge_with(&parsed);
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let animation = parsed.layout.focus_animation;
         assert!(animation.enabled);
         if let Kind::Easing(p) = animation.anim.kind {
             assert_eq!(p.duration_ms, 300);
+        } else {
+            panic!("Expected easing");
         }
         assert!(animation.scale.enabled);
         assert_eq!(animation.scale.flash_scale, 0.9);
@@ -1621,24 +1721,27 @@ mod focus_animation_tests {
     #[test]
     fn focus_animation_spring_parsing() {
         let config = r#"
-            focus-animation {
-                on
-                spring damping-ratio=0.5 stiffness=800 epsilon=0.0001
-                scale {
+            layout {
+                focus-animation {
                     on
-                    flash-scale 0.95
+                    spring damping-ratio=0.5 stiffness=800 epsilon=0.0001
+                    scale {
+                        on
+                        flash-scale 0.95
+                    }
                 }
             }
         "#;
-        let parsed: FocusAnimationPart = knuffel::parse("test", config).unwrap();
-        assert!(parsed.on);
-
-        let anim = parsed.anim.unwrap();
-        if let Kind::Spring(p) = anim.kind {
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let animation = parsed.layout.focus_animation;
+        assert!(animation.enabled);
+        if let Kind::Spring(p) = animation.anim.kind {
             assert_eq!(p.damping_ratio, 0.5);
             assert_eq!(p.stiffness, 800);
         } else {
             panic!("Expected spring");
         }
+        assert!(animation.scale.enabled);
+        assert_eq!(animation.scale.flash_scale, 0.95);
     }
 }

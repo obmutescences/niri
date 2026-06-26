@@ -16,6 +16,7 @@ use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, T
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 use crate::render_helpers::background_effect::RenderParams;
 use crate::render_helpers::effect_buffer::EffectBuffer;
+use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
 use crate::render_helpers::{RenderCtx, RenderTarget};
@@ -81,6 +82,7 @@ pub struct XrayElement {
     saturation: f32,
     bg_color: Color32F,
     program: Option<GlesTexProgram>,
+    liquid_glass: Option<LiquidGlassOptions>,
 }
 
 impl Xray {
@@ -102,6 +104,7 @@ impl Xray {
         blur: bool,
         noise: f32,
         saturation: f32,
+        liquid_glass_options: Option<LiquidGlassOptions>,
         push: &mut dyn FnMut(XrayElement),
     ) {
         let program = Shaders::get(ctx.renderer).postprocess_and_clip.clone();
@@ -202,6 +205,7 @@ impl Xray {
                     saturation,
                     bg_color: *bg_color,
                     program: program.clone(),
+                    liquid_glass: liquid_glass_options,
                 };
                 push(elem);
             }
@@ -252,6 +256,7 @@ impl Xray {
                 saturation,
                 bg_color: self.backdrop_color,
                 program: program.clone(),
+                liquid_glass: liquid_glass_options,
             };
             push(elem);
         }
@@ -259,8 +264,8 @@ impl Xray {
 }
 
 impl XrayElement {
-    fn compute_uniforms(&self) -> [Uniform<'static>; 7] {
-        [
+    fn compute_uniforms(&self) -> Vec<Uniform<'static>> {
+        let mut uniforms = vec![
             Uniform::new("niri_scale", self.scale),
             Uniform::new("geo_size", <[f32; 2]>::from(self.clip_geo_size)),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
@@ -268,8 +273,35 @@ impl XrayElement {
             Uniform::new("noise", self.noise),
             Uniform::new("saturation", self.saturation),
             Uniform::new("bg_color", self.bg_color.components()),
-        ]
+        ];
+
+        extend_liquid_glass_uniforms(&mut uniforms, self.liquid_glass);
+
+        uniforms
     }
+}
+
+fn extend_liquid_glass_uniforms(
+    uniforms: &mut Vec<Uniform<'static>>,
+    liquid_glass: Option<LiquidGlassOptions>,
+) {
+    let lg = liquid_glass.unwrap_or_default();
+    uniforms.extend([
+        Uniform::new("lg_refraction_strength", lg.refraction_strength as f32),
+        Uniform::new("lg_power_factor", lg.power_factor as f32),
+        Uniform::new("lg_refraction_a", lg.refraction_a as f32),
+        Uniform::new("lg_refraction_b", lg.refraction_b as f32),
+        Uniform::new("lg_refraction_c", lg.refraction_c as f32),
+        Uniform::new("lg_refraction_d", lg.refraction_d as f32),
+        Uniform::new("lg_refraction_power", lg.refraction_power as f32),
+        Uniform::new("lg_physical_refraction", 0.0f32),
+        Uniform::new("lg_glow_weight", lg.glow_weight as f32),
+        Uniform::new("lg_glow_bias", lg.glow_bias as f32),
+        Uniform::new("lg_glow_edge0", lg.glow_edge0 as f32),
+        Uniform::new("lg_glow_edge1", lg.glow_edge1 as f32),
+        Uniform::new("lg_edge_lighting", 1.0f32),
+        Uniform::new("lg_fringing", 0.3f32),
+    ]);
 }
 
 impl Element for XrayElement {

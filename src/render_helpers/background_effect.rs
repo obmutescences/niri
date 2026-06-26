@@ -11,6 +11,7 @@ use crate::niri_render_elements;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::damage::ExtraDamage;
 use crate::render_helpers::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement};
+use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::xray::{XrayElement, XrayPos};
 use crate::render_helpers::RenderCtx;
 use crate::utils::region::TransformedRegion;
@@ -36,6 +37,7 @@ pub struct Options {
     pub xray: bool,
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
+    pub liquid_glass: Option<LiquidGlassOptions>,
 }
 
 impl Options {
@@ -44,6 +46,7 @@ impl Options {
             || self.blur
             || self.noise.is_some_and(|x| x > 0.)
             || self.saturation.is_some_and(|x| x != 1.)
+            || self.liquid_glass.is_some()
     }
 }
 
@@ -121,11 +124,14 @@ impl BackgroundEffect {
             effect.blur == Some(true)
         };
 
+        let liquid_glass = effect.liquid_glass.map(LiquidGlassOptions::from);
+
         let mut options = Options {
             blur,
             xray: effect.xray == Some(true),
             noise: effect.noise,
             saturation: effect.saturation,
+            liquid_glass,
         };
 
         // If we have some background effect but xray wasn't explicitly set, default it to true
@@ -193,13 +199,19 @@ impl BackgroundEffect {
                 blur,
                 noise,
                 saturation,
+                self.options.liquid_glass,
                 &mut |elem| push(elem.into()),
             );
         } else {
             // Render non-xray effect.
-            let elem = self
-                .nonxray
-                .render(ns, params, blur_options, noise, saturation);
+            let elem = self.nonxray.render(
+                ns,
+                params,
+                blur_options,
+                noise,
+                saturation,
+                self.options.liquid_glass,
+            );
             push(elem.into());
         }
     }
@@ -275,6 +287,7 @@ fn effect_options_are_visible(
         || blur
         || effect.noise.is_some_and(|x| x > 0.)
         || effect.saturation.is_some_and(|x| x != 1.)
+        || effect.liquid_glass.is_some()
 }
 
 /// Per-surface background effect stored in its data map.
