@@ -94,6 +94,14 @@ GlassFragment glass_refraction(
         refract_offset_b = -normal.xy * (final_strength * (1.0 - fringing_factor));
     }
 
+    // Fix Y-axis: position space has Y inverted relative to UV space
+    // (see position.y = -position.y in glass_effect).
+    // Without this flip, top/bottom edges refract outward instead of inward,
+    // causing the offset to clamp at the texture boundary and killing the effect.
+    refract_offset_r.y = -refract_offset_r.y;
+    refract_offset_g.y = -refract_offset_g.y;
+    refract_offset_b.y = -refract_offset_b.y;
+
     vec2 coord_r = clamp(uv_tex - refract_offset_r, 0.0, 1.0);
     vec2 coord_g = clamp(uv_tex - refract_offset_g, 0.0, 1.0);
     vec2 coord_b = clamp(uv_tex - refract_offset_b, 0.0, 1.0);
@@ -153,6 +161,8 @@ GlassFragment snells_refraction(
 
     float refraction_magnitude = lens_magnitude * refraction_strength;
     vec2 shift_g = dir * refraction_magnitude * uv_scale + lens_shift;
+    // Fix Y-axis: position space has Y inverted relative to UV space.
+    shift_g.y = -shift_g.y;
     vec2 uv_g = clamp(uv_tex + shift_g, 0.0, 1.0);
     vec4 sample_g = texture2D(tex, uv_g);
 
@@ -161,6 +171,8 @@ GlassFragment snells_refraction(
         float fringe = clamp(refraction_rgb_fringing, 0.0, 1.0) * 0.3;
         vec2 shift_r = dir * (refraction_magnitude * (1.0 + fringe)) * uv_scale + lens_shift;
         vec2 shift_b = dir * (refraction_magnitude * (1.0 - fringe)) * uv_scale + lens_shift;
+        shift_r.y = -shift_r.y;
+        shift_b.y = -shift_b.y;
 
         float r = texture2D(tex, clamp(uv_tex + shift_r, 0.0, 1.0)).r;
         float b = texture2D(tex, clamp(uv_tex + shift_b, 0.0, 1.0)).b;
