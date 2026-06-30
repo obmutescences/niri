@@ -179,12 +179,26 @@ vec3 glass_outline(
     float glow_strength,
     float edge_lighting
 ) {
+    // Content luminance: used to adapt the glass effect to light vs dark content.
+    // Light content gets a specular (white-mixing) edge; dark content gets a
+    // subtle brightness boost that preserves its hue.
+    float lum = dot(sample.color.rgb, vec3(0.299, 0.587, 0.114));
+
     float rim_mask = clamp(0.25 * sample.concaveFactor, 0.0, glow_strength);
-    vec3 glow = mix(sample.color.rgb, vec3(1.0), rim_mask);
+
+    // Specular highlight: mix towards white, stronger on light content.
+    float spec_strength = rim_mask * edge_lighting * (0.08 + lum * 0.7);
+    vec3 glow = mix(sample.color.rgb, vec3(1.0), spec_strength);
+
+    // Edge brightness boost: replaces the old additive doubling with a
+    // multiplicative boost that is stronger on dark content (to keep glass
+    // edges visible) and weaker on light content (which is already bright).
     if (edge_lighting > 0.5) {
-        glow += sample.color.rgb * sample.concaveFactor;
+        float boost = sample.concaveFactor * 0.4 * (1.0 - lum * 0.6);
+        glow = glow * (1.0 + boost);
     }
 
+    // Corner highlights: subtle extra specular at top-left and bottom-right.
     if (glow_strength > 0.0) {
         float edge_mask = smoothstep(0.0, -2.0, sample.dist);
         float border_inner = smoothstep(-1.0, -3.0, sample.dist);
@@ -195,8 +209,11 @@ vec3 glass_outline(
         float highlight_mask = smoothstep(-blur_size.y * 0.7, blur_size.y * 0.7, position.y)
             * smoothstep(-blur_size.x * 0.7, blur_size.x * 0.7, position.x);
 
-        glow = mix(glow, vec3(1.0), thickness_shadow * shadow_mask);
-        glow = mix(glow, vec3(1.0), thickness_shadow * highlight_mask);
+        float corner = thickness_shadow * 0.35;
+        float corner_spec = corner * (0.08 + lum * 0.6);
+
+        glow = mix(glow, vec3(1.0), corner_spec * shadow_mask);
+        glow = mix(glow, vec3(1.0), corner_spec * highlight_mask);
     }
 
     return glow;
@@ -273,7 +290,7 @@ vec4 glass_effect(
         );
     }
 
-    vec3 rgb = sample.concaveFactor < 1.0
+    vec3 rgb = sample.concaveFactor <= 1.0
         ? glass_outline(position, blur_size, sample, glow_strength, edge_lighting)
         : sample.color.rgb;
 
