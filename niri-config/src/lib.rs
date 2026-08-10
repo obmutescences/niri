@@ -1437,6 +1437,7 @@ mod tests {
                         enabled: false,
                         flash_scale: 0.9,
                         disable_on_solo: false,
+                        disable_on_floating: false,
                     },
                 },
                 preset_column_widths: [
@@ -2489,8 +2490,10 @@ mod tests {
 
         -                flash_scale: 0.9,
         -                disable_on_solo: false,
+        -                disable_on_floating: false,
         +                flash_scale: 0.95,
         +                disable_on_solo: true,
+        +                disable_on_floating: true,
 
         -                0.3333333333333333,
         +                0.33333,

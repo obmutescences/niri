@@ -3685,7 +3685,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 }
 
                 let is_focused_now = active && is_focused;
-                tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window);
+                tile.update_focus_animation(
+                    &self.options.layout,
+                    is_focused_now,
+                    is_solo_window,
+                    false,
+                );
 
                 let win = tile.window_mut();
                 win.set_active_in_column(active_in_column);

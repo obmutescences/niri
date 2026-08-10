@@ -269,6 +269,9 @@ layout {
 
             // Disable focus animation when there's only one window.
             disable-on-solo true
+
+            // Disable scale flash for floating windows.
+            disable-on-floating true
         }
     }
 

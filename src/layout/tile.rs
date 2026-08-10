@@ -764,9 +764,17 @@ impl<W: LayoutElement> Tile<W> {
         layout_config: &niri_config::Layout,
         is_focused: bool,
         is_solo_window: bool,
+        is_floating: bool,
     ) {
         let focus_config = &layout_config.focus_animation;
         let scale_config = &focus_config.scale;
+
+        if is_floating && scale_config.disable_on_floating {
+            self.scale_animation = None;
+            self.focus_animation_state = FocusAnimationState::Idle;
+            self.was_focused = is_focused;
+            return;
+        }
 
         // Check for Focus Animation Trigger
         let animation_enabled = focus_config.enabled

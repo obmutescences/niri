@@ -1508,6 +1508,7 @@ pub struct FocusScale {
     pub enabled: bool,
     pub flash_scale: f32,
     pub disable_on_solo: bool,
+    pub disable_on_floating: bool,
 }
 
 impl Default for FocusScale {
@@ -1516,6 +1517,7 @@ impl Default for FocusScale {
             enabled: false,
             flash_scale: 0.9,
             disable_on_solo: false,
+            disable_on_floating: false,
         }
     }
 }
@@ -1534,6 +1536,9 @@ impl MergeWith<FocusScalePart> for FocusScale {
         if let Some(disable_on_solo) = part.disable_on_solo {
             self.disable_on_solo = disable_on_solo.0;
         }
+        if let Some(disable_on_floating) = part.disable_on_floating {
+            self.disable_on_floating = disable_on_floating.0;
+        }
     }
 }
 
@@ -1547,6 +1552,8 @@ pub struct FocusScalePart {
     pub flash_scale: Option<FloatOrInt<0, 2>>,
     #[knuffel(child)]
     pub disable_on_solo: Option<Flag>,
+    #[knuffel(child)]
+    pub disable_on_floating: Option<Flag>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -1702,6 +1709,7 @@ mod focus_animation_tests {
                     scale {
                         on
                         flash-scale 0.9
+                        disable-on-floating true
                     }
                 }
             }
@@ -1716,6 +1724,7 @@ mod focus_animation_tests {
         }
         assert!(animation.scale.enabled);
         assert_eq!(animation.scale.flash_scale, 0.9);
+        assert!(animation.scale.disable_on_floating);
     }
 
     #[test]

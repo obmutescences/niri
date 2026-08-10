@@ -1176,7 +1176,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
             let is_focused_now = is_tile_active && is_focused;
 
-            tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window);
+            tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window, true);
 
             let win = tile.window_mut();
 
