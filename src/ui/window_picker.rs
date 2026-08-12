@@ -154,6 +154,22 @@ impl LabelCache {
             .clone()
     }
 
+    fn logical_size(
+        &self,
+        label: &str,
+        scale: f64,
+        config: &WindowPickerLabel,
+    ) -> Option<Size<f64, Logical>> {
+        if self.scale != scale || self.config.as_ref() != Some(config) {
+            return None;
+        }
+
+        self.textures
+            .get(label)
+            .and_then(Option::as_ref)
+            .map(PickerTexture::logical_size)
+    }
+
     fn clear(&mut self) {
         self.config = None;
         self.textures.clear();
@@ -302,6 +318,43 @@ impl WindowPickerUi {
         WindowPickerKeyResult::Handled
     }
 
+    pub fn window_under(
+        &self,
+        niri: &Niri,
+        output: &Output,
+        pos_within_output: Point<f64, Logical>,
+    ) -> Option<MappedId> {
+        let session = self.session.as_ref()?;
+        if output != &session.output {
+            return None;
+        }
+
+        let config = self.config.borrow().window_picker.clone();
+        let progress = session.progress(config.animation_ms);
+        let output_size = output_size(output);
+        let scale = output.current_scale().fractional_scale();
+        let mut windows = picker_windows(niri, session, &config.label);
+        let label_cache = self.label_cache.borrow();
+        for window in &mut windows {
+            if let Some(size) = label_cache.logical_size(&window.entry.label, scale, &config.label)
+            {
+                window.label_size = size;
+            }
+        }
+        let inputs = grid_inputs(&windows);
+        let layout = compute_grid(output_size, &inputs, &config)?;
+
+        windows
+            .iter()
+            .zip(layout.placements)
+            .find_map(|(window, placement)| {
+                let preview = animate_rect(placement.preview, output_size, progress);
+                preview
+                    .contains(pos_within_output)
+                    .then_some(window.entry.id)
+            })
+    }
+
     pub fn are_animations_ongoing(&self) -> bool {
         let Some(session) = &self.session else {
             return false;
@@ -330,45 +383,21 @@ impl WindowPickerUi {
         let scale = output.current_scale().fractional_scale();
 
         if *output == session.output {
-            let by_id: HashMap<_, _> = niri
-                .layout
-                .windows()
-                .map(|(_, mapped)| (mapped.id(), mapped))
-                .collect();
-
-            let mut windows = Vec::new();
-            for entry in &session.entries {
-                let Some(mapped) = by_id.get(&entry.id).copied() else {
-                    continue;
-                };
-                if mapped.size().w <= 0 || mapped.size().h <= 0 {
-                    continue;
-                }
+            let mut windows = picker_windows(niri, session, &config.label);
+            for window in &mut windows {
                 let texture = self.label_cache.borrow_mut().get(
                     ctx.as_gles().renderer,
-                    &entry.label,
+                    &window.entry.label,
                     scale,
                     &config.label,
                 );
-                let label_size = texture.as_ref().map_or_else(
-                    || estimated_label_size(&entry.label, &config.label),
-                    PickerTexture::logical_size,
-                );
-                windows.push(RenderedWindow {
-                    entry,
-                    mapped,
-                    texture,
-                    label_size,
-                });
+                if let Some(texture) = &texture {
+                    window.label_size = texture.logical_size();
+                }
+                window.texture = texture;
             }
 
-            let inputs: Vec<_> = windows
-                .iter()
-                .map(|window| GridInput {
-                    window_size: window.mapped.size().to_f64(),
-                    label_size: window.label_size,
-                })
-                .collect();
+            let inputs = grid_inputs(&windows);
 
             if let Some(layout) = compute_grid(size, &inputs, &config) {
                 for (window, placement) in windows.iter().zip(layout.placements) {
@@ -380,10 +409,15 @@ impl WindowPickerUi {
                     } else {
                         alpha
                     };
+                    let preview = animate_rect(placement.preview, size, progress);
+                    let final_center =
+                        placement.preview.loc + placement.preview.size.to_point().upscale(0.5);
+                    let animated_center = preview.loc + preview.size.to_point().upscale(0.5);
+                    let label_loc = placement.label.loc + (animated_center - final_center);
                     if let Some(texture) = &window.texture {
                         let texture = TextureRenderElement::from_texture_buffer(
                             texture.clone(),
-                            placement.label.loc,
+                            label_loc,
                             entry_alpha,
                             None,
                             Some(placement.label.size),
@@ -394,7 +428,6 @@ impl WindowPickerUi {
                         ));
                     }
 
-                    let preview = animate_rect(placement.preview, progress);
                     render_thumbnail(ctx.r(), scale, window.mapped, preview, entry_alpha, push);
                 }
             }
@@ -485,6 +518,42 @@ struct RenderedWindow<'a> {
     label_size: Size<f64, Logical>,
 }
 
+fn picker_windows<'a>(
+    niri: &'a Niri,
+    session: &'a WindowPickerSession,
+    label_config: &WindowPickerLabel,
+) -> Vec<RenderedWindow<'a>> {
+    let by_id: HashMap<_, _> = niri
+        .layout
+        .windows()
+        .map(|(_, mapped)| (mapped.id(), mapped))
+        .collect();
+
+    session
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let mapped = by_id.get(&entry.id).copied()?;
+            (mapped.size().w > 0 && mapped.size().h > 0).then(|| RenderedWindow {
+                entry,
+                mapped,
+                texture: None,
+                label_size: estimated_label_size(&entry.label, label_config),
+            })
+        })
+        .collect()
+}
+
+fn grid_inputs(windows: &[RenderedWindow<'_>]) -> Vec<GridInput> {
+    windows
+        .iter()
+        .map(|window| GridInput {
+            window_size: window.mapped.size().to_f64(),
+            label_size: window.label_size,
+        })
+        .collect()
+}
+
 fn render_thumbnail<R: NiriRenderer>(
     mut ctx: RenderCtx<R>,
     output_scale: f64,
@@ -531,11 +600,38 @@ fn render_thumbnail<R: NiriRenderer>(
     });
 }
 
-fn animate_rect(rect: Rectangle<f64, Logical>, progress: f64) -> Rectangle<f64, Logical> {
+fn animate_rect(
+    rect: Rectangle<f64, Logical>,
+    output: Size<f64, Logical>,
+    progress: f64,
+) -> Rectangle<f64, Logical> {
+    let output_center = output.to_point().upscale(0.5);
+    let target_center = rect.loc + rect.size.to_point().upscale(0.5);
+    let mut direction = target_center - output_center;
+    if direction.x.abs() < f64::EPSILON && direction.y.abs() < f64::EPSILON {
+        direction.y = -1.;
+    }
+
+    let x_factor = if direction.x < 0. {
+        (-rect.size.w / 2. - output_center.x) / direction.x
+    } else if direction.x > 0. {
+        (output.w + rect.size.w / 2. - output_center.x) / direction.x
+    } else {
+        f64::INFINITY
+    };
+    let y_factor = if direction.y < 0. {
+        (-rect.size.h / 2. - output_center.y) / direction.y
+    } else if direction.y > 0. {
+        (output.h + rect.size.h / 2. - output_center.y) / direction.y
+    } else {
+        f64::INFINITY
+    };
+    let entry_center = output_center + direction.upscale(x_factor.min(y_factor));
+    let center = entry_center + (target_center - entry_center).upscale(progress);
+
     let scale = 0.9 + progress * 0.1;
     let size = rect.size.upscale(scale);
-    let offset = (rect.size - size).to_point().upscale(0.5);
-    Rectangle::new(rect.loc + offset, size)
+    Rectangle::new(center - size.to_point().upscale(0.5), size)
 }
 
 #[derive(Debug, Clone, Copy)]

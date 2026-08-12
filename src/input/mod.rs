@@ -2898,11 +2898,32 @@ impl State {
             return;
         }
 
-        // The picker is deliberately keyboard-only. Keep clicks from changing focus or the active
-        // output behind its modal backdrop.
+        // The picker remains modal, but a left click on a preview selects that window. All other
+        // clicks are consumed so they cannot interact with the desktop behind the backdrop.
         if self.niri.window_picker_ui.is_open() {
             if button_state == ButtonState::Pressed {
+                let selected = if button == Some(MouseButton::Left) {
+                    let location = pointer.current_location();
+                    self.niri
+                        .output_under(location)
+                        .and_then(|(output, pos_within_output)| {
+                            self.niri.window_picker_ui.window_under(
+                                &self.niri,
+                                output,
+                                pos_within_output,
+                            )
+                        })
+                } else {
+                    None
+                };
                 self.niri.suppressed_buttons.insert(button_code);
+                if let Some(id) = selected {
+                    if let Some(window) = self.niri.find_window_by_id(id) {
+                        self.niri.window_picker_ui.close();
+                        self.update_keyboard_focus();
+                        self.focus_window(&window);
+                    }
+                }
                 return;
             }
 
