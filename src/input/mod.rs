@@ -52,6 +52,7 @@ use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
+use crate::ui::window_picker::{WindowPickerKeyResult, WindowPickerSession};
 use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
 
@@ -464,7 +465,8 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.niri.seat.get_keyboard().unwrap().input(
+        let mut picker_selection = None;
+        let input_result = self.niri.seat.get_keyboard().unwrap().input(
             self,
             event.key_code(),
             event.state(),
@@ -522,6 +524,60 @@ impl State {
 
                     // Don't send this press to any clients.
                     this.niri.suppressed_keys.insert(key_code);
+                    return FilterResult::Intercept(None);
+                }
+
+                // The window picker is a modal keyboard UI, but its own configured toggle bind
+                // remains available so pressing the shortcut again closes it. Modifier release
+                // never confirms or closes the picker.
+                if this.niri.window_picker_ui.is_open() {
+                    // Keep Smithay's forwarded modifier state in sync while the picker owns
+                    // keyboard focus. This lets a client regain focus while a modifier is still
+                    // held (for example after pressing Mod+Tab again) and receive its later
+                    // release.
+                    if matches!(
+                        modified,
+                        Keysym::Shift_L
+                            | Keysym::Shift_R
+                            | Keysym::Control_L
+                            | Keysym::Control_R
+                            | Keysym::Super_L
+                            | Keysym::Super_R
+                            | Keysym::Alt_L
+                            | Keysym::Alt_R
+                    ) {
+                        return FilterResult::Forward;
+                    }
+
+                    if !pressed {
+                        if this.niri.suppressed_keys.remove(&key_code) {
+                            return FilterResult::Intercept(None);
+                        }
+                        return FilterResult::Forward;
+                    }
+
+                    let toggle_bind = raw.and_then(|raw| {
+                        find_configured_bind(
+                            this.niri.config.borrow().binds.0.iter(),
+                            mod_key,
+                            Trigger::Keysym(raw),
+                            *mods,
+                        )
+                        .filter(|bind| matches!(bind.action, Action::ToggleWindowPicker))
+                    });
+                    this.niri.suppressed_keys.insert(key_code);
+                    if let Some(bind) = toggle_bind {
+                        return FilterResult::Intercept(Some(bind));
+                    }
+
+                    if let Some(raw) = raw {
+                        let result = this.niri.window_picker_ui.handle_key(raw);
+                        this.niri.queue_redraw_all();
+
+                        if let WindowPickerKeyResult::Selected(id) = result {
+                            picker_selection = Some(id);
+                        }
+                    }
                     return FilterResult::Intercept(None);
                 }
 
@@ -591,7 +647,17 @@ impl State {
 
                 res
             },
-        ) else {
+        );
+
+        if let Some(id) = picker_selection {
+            if let Some(window) = self.niri.find_window_by_id(id) {
+                self.niri.window_picker_ui.close();
+                self.update_keyboard_focus();
+                self.focus_window(&window);
+            }
+        }
+
+        let Some(Some(bind)) = input_result else {
             return;
         };
 
@@ -704,6 +770,7 @@ impl State {
 
         match action {
             Action::Quit(skip_confirmation) => {
+                self.niri.window_picker_ui.close();
                 if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
                     self.niri.queue_redraw_all();
                     return;
@@ -2292,16 +2359,53 @@ impl State {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
             Action::ToggleOverview => {
+                self.niri.window_picker_ui.close();
                 self.niri.layout.toggle_overview();
                 self.niri.queue_redraw_all();
             }
             Action::OpenOverview => {
+                self.niri.window_picker_ui.close();
                 if self.niri.layout.open_overview() {
                     self.niri.queue_redraw_all();
                 }
             }
             Action::CloseOverview => {
                 if self.niri.layout.close_overview() {
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::ToggleWindowPicker => {
+                if self.niri.window_picker_ui.close() {
+                    self.niri.queue_redraw_all();
+                    return;
+                }
+
+                if self.niri.is_locked()
+                    || self.niri.screenshot_ui.is_open()
+                    || self.niri.exit_confirm_dialog.is_open()
+                {
+                    return;
+                }
+
+                self.niri.cancel_mru();
+                self.niri.layout.close_overview();
+                self.niri.mru_apply_keyboard_commit();
+                if let Some(session) = WindowPickerSession::collect(&self.niri) {
+                    // The picker is modal. Finish any compositor-side pointer/tablet operation
+                    // that may have started before the keyboard shortcut was pressed.
+                    let time = get_monotonic_time().as_millis() as u32;
+                    self.niri.seat.get_pointer().unwrap().unset_grab(
+                        self,
+                        SERIAL_COUNTER.next_serial(),
+                        time,
+                    );
+                    self.niri.seat.tablet_seat().with_tools(|tools| {
+                        for tool in tools.values() {
+                            tool.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+                        }
+                    });
+
+                    self.niri.window_picker_ui.open(session);
                     self.niri.queue_redraw_all();
                 }
             }
@@ -2355,6 +2459,7 @@ impl State {
                 scope,
                 filter,
             } => {
+                self.niri.window_picker_ui.close();
                 if self.niri.window_mru_ui.is_open() {
                     self.niri.window_mru_ui.advance(direction, filter);
                     self.niri.queue_redraw_mru_output();
@@ -2793,6 +2898,29 @@ impl State {
             return;
         }
 
+        // The picker is deliberately keyboard-only. Keep clicks from changing focus or the active
+        // output behind its modal backdrop.
+        if self.niri.window_picker_ui.is_open() {
+            if button_state == ButtonState::Pressed {
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
+
+            // A button may have been pressed before the picker opened. Forward that release so
+            // Smithay and the previously focused client do not retain a stuck button/grab.
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button: button_code,
+                    state: button_state,
+                    serial,
+                    time: event.time_msec(),
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
+
         let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
         let modifiers = modifiers_from_state(mods);
         let mod_down = modifiers.contains(mod_key.to_modifiers());
@@ -3101,6 +3229,10 @@ impl State {
     }
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let pointer = &self.niri.seat.get_pointer().unwrap();
 
         let source = event.source();
@@ -3612,6 +3744,21 @@ impl State {
         let tool = tablet_seat.get_tool(&event.tool());
         if let Some(tool) = tool {
             let time = event.time_msec();
+            let serial = SERIAL_COUNTER.next_serial();
+
+            if self.niri.window_picker_ui.is_open() {
+                // Clear any previous tablet focus before emitting changed axes, so the modal
+                // picker cannot leak pressure or wheel events to the window below it.
+                tool.motion(
+                    self,
+                    None,
+                    &tablet::tool::MotionEvent {
+                        location: pos,
+                        serial,
+                        time,
+                    },
+                );
+            }
 
             let frame = tablet::tool::AxisFrame {
                 pressure: event.pressure_has_changed().then(|| event.pressure()),
@@ -3625,15 +3772,17 @@ impl State {
             };
             tool.axis(self, frame);
 
-            tool.motion(
-                self,
-                under.surface,
-                &tablet::tool::MotionEvent {
-                    location: pos,
-                    serial: SERIAL_COUNTER.next_serial(),
-                    time,
-                },
-            );
+            if !self.niri.window_picker_ui.is_open() {
+                tool.motion(
+                    self,
+                    under.surface,
+                    &tablet::tool::MotionEvent {
+                        location: pos,
+                        serial,
+                        time,
+                    },
+                );
+            }
 
             tool.frame(self, time);
 
@@ -3702,6 +3851,18 @@ impl State {
                                 self.niri.cancel_mru();
                             }
                         }
+                    } else if self.niri.window_picker_ui.is_open() {
+                        // Keep the tool's tip sequence balanced, but clear its surface focus so
+                        // the press cannot interact with the desktop behind the picker.
+                        tool.motion(
+                            self,
+                            None,
+                            &tablet::tool::MotionEvent {
+                                location: pos,
+                                serial,
+                                time,
+                            },
+                        );
                     } else if !tool.is_grabbed() {
                         if self.niri.layout.is_overview_open()
                             && !mod_down
@@ -3881,6 +4042,12 @@ impl State {
                 return;
             }
 
+            if self.niri.window_picker_ui.is_open() && event.button_state() == ButtonState::Pressed
+            {
+                self.niri.suppressed_buttons.insert(button);
+                return;
+            }
+
             let trigger = match button {
                 BTN_STYLUS => Some(Trigger::TabletStylusButton1),
                 BTN_STYLUS2 => Some(Trigger::TabletStylusButton2),
@@ -3930,8 +4097,8 @@ impl State {
     }
 
     fn on_gesture_swipe_begin<I: InputBackend>(&mut self, event: I::GestureSwipeBeginEvent) {
-        if self.niri.window_mru_ui.is_open() {
-            // Don't start swipe gestures while in the MRU.
+        if self.niri.window_mru_ui.is_open() || self.niri.window_picker_ui.is_open() {
+            // Don't start workspace or overview gestures while a window switcher is modal.
             return;
         }
 
@@ -3971,6 +4138,10 @@ impl State {
     ) where
         I::Device: 'static,
     {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let mut delta_x = event.delta_x();
         let mut delta_y = event.delta_y();
 
@@ -4087,6 +4258,10 @@ impl State {
     }
 
     fn on_gesture_swipe_end<I: InputBackend>(&mut self, event: I::GestureSwipeEndEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         self.niri.gesture_swipe_3f_cumulative = None;
 
         let mut handled = false;
@@ -4131,6 +4306,10 @@ impl State {
     }
 
     fn on_gesture_pinch_begin<I: InputBackend>(&mut self, event: I::GesturePinchBeginEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -4149,6 +4328,10 @@ impl State {
     }
 
     fn on_gesture_pinch_update<I: InputBackend>(&mut self, event: I::GesturePinchUpdateEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let pointer = self.niri.seat.get_pointer().unwrap();
 
         if self.update_pointer_contents() {
@@ -4167,6 +4350,10 @@ impl State {
     }
 
     fn on_gesture_pinch_end<I: InputBackend>(&mut self, event: I::GesturePinchEndEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -4185,6 +4372,10 @@ impl State {
     }
 
     fn on_gesture_hold_begin<I: InputBackend>(&mut self, event: I::GestureHoldBeginEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -4203,6 +4394,10 @@ impl State {
     }
 
     fn on_gesture_hold_end<I: InputBackend>(&mut self, event: I::GestureHoldEndEvent) {
+        if self.niri.window_picker_ui.is_open() {
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
@@ -4300,6 +4495,9 @@ impl State {
                     self.niri.cancel_mru();
                 }
             }
+        } else if self.niri.window_picker_ui.is_open() {
+            // The picker is keyboard-only. The touch sequence is still sent with no surface below
+            // so a later up/cancel remains balanced, but it must not activate an output or window.
         } else if !handle.is_grabbed() {
             if self.niri.layout.is_overview_open()
                 && !mod_down

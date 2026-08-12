@@ -173,6 +173,7 @@ use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
 use crate::ui::screen_transition::{self, ScreenTransition};
 use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
+use crate::ui::window_picker::{WindowPickerUi, WindowPickerUiRenderElement};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
 use crate::utils::spawning::{CHILD_DISPLAY, CHILD_ENV};
 use crate::utils::vblank_throttle::VBlankThrottle;
@@ -396,6 +397,8 @@ pub struct Niri {
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
 
+    pub window_picker_ui: WindowPickerUi,
+
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
 
@@ -526,6 +529,7 @@ pub enum KeyboardFocus {
     ExitConfirmDialog,
     Overview,
     Mru,
+    WindowPicker,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -675,6 +679,7 @@ impl KeyboardFocus {
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
+            KeyboardFocus::WindowPicker => None,
         }
     }
 
@@ -687,6 +692,7 @@ impl KeyboardFocus {
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
+            KeyboardFocus::WindowPicker => None,
         }
     }
 
@@ -1162,6 +1168,8 @@ impl State {
             KeyboardFocus::ScreenshotUi
         } else if self.niri.window_mru_ui.is_open() {
             KeyboardFocus::Mru
+        } else if self.niri.window_picker_ui.is_open() {
+            KeyboardFocus::WindowPicker
         } else if let Some(output) = self.niri.layout.active_output() {
             let mon = self.niri.layout.monitor_for_output(output).unwrap();
             let layers = layer_map_for_output(output);
@@ -1492,6 +1500,7 @@ impl State {
         let mut shaders_changed = false;
         let mut cursor_inactivity_timeout_changed = false;
         let mut recent_windows_changed = false;
+        let mut window_picker_changed = false;
         let mut xwls_changed = false;
         let mut old_config = self.niri.config.borrow_mut();
 
@@ -1621,6 +1630,10 @@ impl State {
             recent_windows_changed = true;
         }
 
+        if config.window_picker != old_config.window_picker {
+            window_picker_changed = true;
+        }
+
         if config.xwayland_satellite != old_config.xwayland_satellite {
             xwls_changed = true;
         }
@@ -1701,6 +1714,10 @@ impl State {
 
         if recent_windows_changed {
             self.niri.window_mru_ui.update_config();
+        }
+
+        if window_picker_changed {
+            self.niri.window_picker_ui.update_config();
         }
 
         if xwls_changed {
@@ -1979,6 +1996,10 @@ impl State {
     pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
         if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
             return;
+        }
+
+        if self.niri.window_picker_ui.close() {
+            self.niri.queue_redraw_all();
         }
 
         let default_output = self
@@ -2436,6 +2457,7 @@ impl Niri {
 
         let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
         let window_mru_ui = WindowMruUi::new(config.clone());
+        let window_picker_ui = WindowPickerUi::new(config.clone());
         let config_error_notification =
             ConfigErrorNotification::new(animation_clock.clone(), config.clone());
 
@@ -2632,6 +2654,8 @@ impl Niri {
 
             window_mru_ui,
             pending_mru_commit: None,
+
+            window_picker_ui,
 
             pick_window: None,
             pick_color: None,
@@ -2999,6 +3023,15 @@ impl Niri {
         if self.window_mru_ui.output() == Some(output) {
             self.cancel_mru();
         }
+
+        if self
+            .window_picker_ui
+            .output()
+            .is_some_and(|picker_output| picker_output == output)
+        {
+            self.window_picker_ui.close();
+            self.queue_redraw_all();
+        }
     }
 
     pub fn output_resized(&mut self, output: &Output) {
@@ -3233,7 +3266,11 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.exit_confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        if self.exit_confirm_dialog.is_open()
+            || self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.window_picker_ui.is_open()
+        {
             return None;
         }
 
@@ -3270,6 +3307,7 @@ impl Niri {
             || self.is_locked()
             || self.screenshot_ui.is_open()
             || self.window_mru_ui.is_open()
+            || self.window_picker_ui.is_open()
         {
             return None;
         }
@@ -3349,7 +3387,10 @@ impl Niri {
             return rv;
         }
 
-        if self.screenshot_ui.is_open() || self.window_mru_ui.is_open() {
+        if self.screenshot_ui.is_open()
+            || self.window_mru_ui.is_open()
+            || self.window_picker_ui.is_open()
+        {
             return rv;
         }
 
@@ -4015,6 +4056,7 @@ impl Niri {
             KeyboardFocus::ExitConfirmDialog => true,
             KeyboardFocus::Overview => true,
             KeyboardFocus::Mru => true,
+            KeyboardFocus::WindowPicker => true,
         };
 
         self.layout.refresh(layout_is_active);
@@ -4087,6 +4129,17 @@ impl Niri {
         self.exit_confirm_dialog.advance_animations();
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
+
+        if self.window_picker_ui.is_open() {
+            let live_ids = self
+                .layout
+                .windows()
+                .map(|(_, mapped)| mapped.id())
+                .collect();
+            if self.window_picker_ui.retain_windows(&live_ids) {
+                self.queue_redraw_all();
+            }
+        }
 
         for state in self.output_state.values_mut() {
             if let Some(transition) = &mut state.screen_transition {
@@ -4314,6 +4367,11 @@ impl Niri {
 
         // Then, the Alt-Tab switcher.
         self.window_mru_ui
+            .render_output(self, output, ctx.r(), &mut |elem| push(elem.into()));
+
+        // The picker is pushed before the desktop so its backdrop effect captures the desktop,
+        // while the thumbnails and labels remain sharp above it.
+        self.window_picker_ui
             .render_output(self, output, ctx.r(), &mut |elem| push(elem.into()));
 
         // Don't draw the focus ring on the workspaces while interactively moving above those
@@ -4631,6 +4689,7 @@ impl Niri {
             state.unfinished_animations_remain |= self.exit_confirm_dialog.are_animations_ongoing();
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.window_mru_ui.are_animations_ongoing();
+            state.unfinished_animations_remain |= self.window_picker_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= state.screen_transition.is_some();
 
             // Also keep redrawing if the current cursor is animated.
@@ -5888,6 +5947,10 @@ impl Niri {
 
         info!("locking session");
 
+        if self.window_picker_ui.close() {
+            self.queue_redraw_all();
+        }
+
         if self.output_state.is_empty() {
             // There are no outputs, lock the session right away.
             self.screenshot_ui.close();
@@ -5954,6 +6017,7 @@ impl Niri {
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());
                 self.cancel_mru();
+                self.window_picker_ui.close();
 
                 if self.output_state.is_empty() {
                     // There are no outputs, lock the session right away.
@@ -6212,7 +6276,7 @@ impl Niri {
             return;
         }
 
-        if self.window_mru_ui.is_open() {
+        if self.window_mru_ui.is_open() || self.window_picker_ui.is_open() {
             return;
         }
 
@@ -6552,6 +6616,7 @@ niri_render_elements! {
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
+        WindowPickerUi = WindowPickerUiRenderElement<R>,
         ExitConfirmDialog = ExitConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.

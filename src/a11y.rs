@@ -20,6 +20,7 @@ const ID_SCREENSHOT_UI: NodeId = NodeId(2);
 const ID_EXIT_CONFIRM_DIALOG: NodeId = NodeId(3);
 const ID_OVERVIEW: NodeId = NodeId(4);
 const ID_MRU: NodeId = NodeId(5);
+const ID_WINDOW_PICKER: NodeId = NodeId(6);
 
 pub struct A11y {
     event_loop: LoopHandle<'static, State>,
@@ -276,6 +277,7 @@ impl Niri {
             KeyboardFocus::ExitConfirmDialog => ID_EXIT_CONFIRM_DIALOG,
             KeyboardFocus::Overview => ID_OVERVIEW,
             KeyboardFocus::Mru => ID_MRU,
+            KeyboardFocus::WindowPicker => ID_WINDOW_PICKER,
             _ => ID_ROOT,
         }
     }
@@ -311,6 +313,9 @@ impl Niri {
         let mut mru = Node::new(Role::Group);
         mru.set_label("Recent windows");
 
+        let mut window_picker = Node::new(Role::Group);
+        window_picker.set_label("Window picker");
+
         let mut root = Node::new(Role::Window);
         root.set_children(vec![
             ID_ANNOUNCEMENT,
@@ -318,6 +323,7 @@ impl Niri {
             ID_EXIT_CONFIRM_DIALOG,
             ID_OVERVIEW,
             ID_MRU,
+            ID_WINDOW_PICKER,
         ]);
 
         let tree = Tree {
@@ -339,6 +345,7 @@ impl Niri {
                 (ID_EXIT_CONFIRM_DIALOG, exit_confirm_dialog),
                 (ID_OVERVIEW, overview),
                 (ID_MRU, mru),
+                (ID_WINDOW_PICKER, window_picker),
             ],
             tree: Some(tree),
             tree_id: TreeId::ROOT,

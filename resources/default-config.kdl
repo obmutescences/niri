@@ -330,6 +330,42 @@ animations {
     // slowdown 3.0
 }
 
+// Keyboard-driven window picker. The shortcut is opt-in in the binds section below.
+window-picker {
+    // Maximum portion of the active output used by the centered window grid.
+    area-width 0.8
+    area-height 0.8
+    max-scale 0.65
+    gap 24
+
+    label {
+        font "Sans Bold"
+        size 24
+        text-color "#ffffffff"
+        background-color "#161a22e6"
+        border-color "#73dacaff"
+        padding-x 14
+        padding-y 7
+        gap 12
+        corner-radius 8
+    }
+
+    // These effects apply to the desktop as a whole; previews and labels stay sharp.
+    backdrop {
+        brightness 0.55
+        color "#10131a33"
+        saturation 0.85
+
+        blur {
+            on
+            passes 3
+            offset 3
+        }
+    }
+
+    animation-ms 180
+}
+
 // Window rules let you adjust behavior for individual windows.
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Window-Rules
@@ -424,6 +460,10 @@ binds {
     // You can also move the mouse into the top-left hot corner,
     // or do a four-finger swipe up on a touchpad.
     Mod+O repeat=false { toggle-overview; }
+
+    // Open the keyboard-driven window picker. It stays open after Mod is released;
+    // press the letter shown above a window to focus it, or Escape to close it.
+    // Mod+Tab repeat=false { toggle-window-picker; }
 
     Mod+Q repeat=false { close-window; }
 

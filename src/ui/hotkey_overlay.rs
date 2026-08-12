@@ -260,6 +260,13 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
         &Action::ToggleOverview,
     ]);
 
+    if binds
+        .iter()
+        .any(|bind| matches!(bind.action, Action::ToggleWindowPicker))
+    {
+        actions.push(&Action::ToggleWindowPicker);
+    }
+
     // Screenshot is not as important, can omit if not bound.
     if let Some(bind) = binds
         .iter()
@@ -479,6 +486,7 @@ fn action_name(action: &Action) -> String {
             String::from("Switch Focus Between Floating and Tiling")
         }
         Action::ToggleOverview => String::from("Open the Overview"),
+        Action::ToggleWindowPicker => String::from("Open the Window Picker"),
         Action::Screenshot(_, _) => String::from("Take a Screenshot"),
         Action::Spawn(args) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",

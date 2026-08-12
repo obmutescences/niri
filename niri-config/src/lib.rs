@@ -41,6 +41,7 @@ pub mod misc;
 pub mod output;
 pub mod recent_windows;
 pub mod utils;
+pub mod window_picker;
 pub mod window_rule;
 pub mod workspace;
 
@@ -59,6 +60,7 @@ use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
+pub use crate::window_picker::{WindowPicker, WindowPickerLabel};
 pub use crate::window_rule::{
     FloatingPosition, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
 };
@@ -92,6 +94,7 @@ pub struct Config {
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
     pub recent_windows: RecentWindows,
+    pub window_picker: WindowPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +203,7 @@ where
                 "blur" => m_merge!(blur),
                 "gestures" => m_merge!(gestures),
                 "overview" => m_merge!(overview),
+                "window-picker" => m_merge!(window_picker),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
@@ -2420,6 +2424,54 @@ mod tests {
                         hotkey_overlay_title: None,
                     },
                 ],
+            },
+            window_picker: WindowPicker {
+                area_width: 0.8,
+                area_height: 0.8,
+                max_scale: 0.65,
+                gap: 24.0,
+                label: WindowPickerLabel {
+                    font: "Sans Bold",
+                    size: 24.0,
+                    text_color: Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    background_color: Color {
+                        r: 0.08627451,
+                        g: 0.101960786,
+                        b: 0.13333334,
+                        a: 0.9019608,
+                    },
+                    border_color: Color {
+                        r: 0.4509804,
+                        g: 0.85490197,
+                        b: 0.7921569,
+                        a: 1.0,
+                    },
+                    padding_x: 14.0,
+                    padding_y: 7.0,
+                    gap: 12.0,
+                    corner_radius: 8.0,
+                },
+                backdrop: WindowPickerBackdrop {
+                    brightness: 0.55,
+                    color: Color {
+                        r: 0.0627451,
+                        g: 0.07450981,
+                        b: 0.101960786,
+                        a: 0.2,
+                    },
+                    saturation: 0.85,
+                    blur: WindowPickerBlur {
+                        on: true,
+                        passes: 3,
+                        offset: 3.0,
+                    },
+                },
+                animation_ms: 180,
             },
         }
         "#);
