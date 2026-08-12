@@ -10,7 +10,8 @@ pub struct WindowPicker {
     pub gap: f64,
     pub label: WindowPickerLabel,
     pub backdrop: WindowPickerBackdrop,
-    pub animation_ms: u16,
+    pub animation_ms_open: u16,
+    pub animation_ms_close: u16,
 }
 
 impl Default for WindowPicker {
@@ -22,7 +23,8 @@ impl Default for WindowPicker {
             gap: 24.,
             label: WindowPickerLabel::default(),
             backdrop: WindowPickerBackdrop::default(),
-            animation_ms: 180,
+            animation_ms_open: 180,
+            animation_ms_close: 180,
         }
     }
 }
@@ -42,14 +44,17 @@ pub struct WindowPickerPart {
     #[knuffel(child)]
     pub backdrop: Option<WindowPickerBackdropPart>,
     #[knuffel(child, unwrap(argument))]
-    pub animation_ms: Option<u16>,
+    pub animation_ms_open: Option<u16>,
+    #[knuffel(child, unwrap(argument))]
+    pub animation_ms_close: Option<u16>,
 }
 
 impl MergeWith<WindowPickerPart> for WindowPicker {
     fn merge_with(&mut self, part: &WindowPickerPart) {
         merge!((self, part), area_width, area_height, max_scale, gap);
         merge!((self, part), label, backdrop);
-        merge_clone!((self, part), animation_ms);
+        merge_clone!((self, part), animation_ms_open);
+        merge_clone!((self, part), animation_ms_close);
     }
 }
 
@@ -235,7 +240,8 @@ mod tests {
                     }
                 }
 
-                animation-ms 220
+                animation-ms-open 220
+                animation-ms-close 350
             }
             "##,
         )
@@ -256,7 +262,8 @@ mod tests {
         assert!(!config.window_picker.backdrop.blur.on);
         assert_eq!(config.window_picker.backdrop.blur.passes, 5);
         assert_eq!(config.window_picker.backdrop.blur.offset, 4.);
-        assert_eq!(config.window_picker.animation_ms, 220);
+        assert_eq!(config.window_picker.animation_ms_open, 220);
+        assert_eq!(config.window_picker.animation_ms_close, 350);
     }
 
     #[test]

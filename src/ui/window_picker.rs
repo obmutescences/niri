@@ -156,33 +156,45 @@ impl WindowPickerState {
         }
     }
 
-    fn progress(&self, duration_ms: u16) -> f64 {
+    fn progress(&self, open_duration_ms: u16, close_duration_ms: u16) -> f64 {
         match self {
-            Self::Open(session) => session.progress(duration_ms),
+            Self::Open(session) => session.progress(open_duration_ms),
             Self::Closing {
                 session,
                 closed_at,
                 from_progress,
-            } => {
-                if duration_ms == 0 {
-                    return 0.;
-                }
-
-                let elapsed = session.clock.now().saturating_sub(*closed_at);
-                let elapsed = elapsed.as_secs_f64() / (f64::from(duration_ms) / 1000.);
-                ease_out_cubic((from_progress - elapsed).clamp(0., 1.))
-            }
+            } => closing_progress(
+                session.clock.now(),
+                *closed_at,
+                *from_progress,
+                close_duration_ms,
+            ),
             Self::Closed => 0.,
         }
     }
 
-    fn animation_is_ongoing(&self, duration_ms: u16) -> bool {
+    fn animation_is_ongoing(&self, open_duration_ms: u16, close_duration_ms: u16) -> bool {
         match self {
-            Self::Open(session) => session.animation_is_ongoing(duration_ms),
-            Self::Closing { .. } => true,
+            Self::Open(session) => session.animation_is_ongoing(open_duration_ms),
+            Self::Closing { .. } => close_duration_ms != 0,
             Self::Closed => false,
         }
     }
+}
+
+fn closing_progress(
+    now: Duration,
+    closed_at: Duration,
+    from_progress: f64,
+    close_duration_ms: u16,
+) -> f64 {
+    if close_duration_ms == 0 {
+        return 0.;
+    }
+
+    let elapsed = now.saturating_sub(closed_at);
+    let elapsed = elapsed.as_secs_f64() / (f64::from(close_duration_ms) / 1000.);
+    ease_out_cubic((from_progress - elapsed).clamp(0., 1.))
 }
 
 fn ease_out_cubic(progress: f64) -> f64 {
@@ -295,10 +307,10 @@ impl WindowPickerUi {
             return was_active;
         };
 
-        let duration_ms = self.config.borrow().window_picker.animation_ms;
+        let config = self.config.borrow().window_picker.clone();
         session.prefix = None;
-        let from_progress = session.linear_progress(duration_ms);
-        if duration_ms == 0 || from_progress == 0. {
+        let from_progress = session.linear_progress(config.animation_ms_open);
+        if config.animation_ms_close == 0 || from_progress == 0. {
             self.finish_close();
         } else {
             let closed_at = session.clock.now();
@@ -327,9 +339,12 @@ impl WindowPickerUi {
     }
 
     pub fn advance_animations(&mut self) -> bool {
-        let duration_ms = self.config.borrow().window_picker.animation_ms;
+        let config = self.config.borrow().window_picker.clone();
         let finished = matches!(self.state, WindowPickerState::Closing { .. })
-            && self.state.progress(duration_ms) <= 0.;
+            && self
+                .state
+                .progress(config.animation_ms_open, config.animation_ms_close)
+                <= 0.;
         if finished {
             self.close_immediately();
         }
@@ -438,7 +453,7 @@ impl WindowPickerUi {
         }
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = session.progress(config.animation_ms);
+        let progress = session.progress(config.animation_ms_open);
         let output_size = output_size(output);
         let scale = output.current_scale().fractional_scale();
         let mut windows = picker_windows(niri, session, &config.label);
@@ -464,8 +479,9 @@ impl WindowPickerUi {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
+        let config = self.config.borrow().window_picker.clone();
         self.state
-            .animation_is_ongoing(self.config.borrow().window_picker.animation_ms)
+            .animation_is_ongoing(config.animation_ms_open, config.animation_ms_close)
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -483,7 +499,9 @@ impl WindowPickerUi {
         }
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = self.state.progress(config.animation_ms);
+        let progress = self
+            .state
+            .progress(config.animation_ms_open, config.animation_ms_close);
         let alpha = progress as f32;
         let size = output_size(output);
         let scale = output.current_scale().fractional_scale();
@@ -1136,6 +1154,24 @@ mod tests {
             assert!(area.contains_rect(placement.preview));
             assert!(area.contains_rect(placement.label));
         }
+    }
+
+    #[test]
+    fn closing_progress_uses_close_duration() {
+        let closed_at = Duration::ZERO;
+        // Half of a 200 ms close from full open progress.
+        let half = closing_progress(Duration::from_millis(100), closed_at, 1.0, 200);
+        let expected = 1. - (1. - 0.5_f64).powi(3);
+        assert!((half - expected).abs() < 1e-9);
+
+        // Zero close duration closes instantly.
+        assert_eq!(closing_progress(Duration::ZERO, closed_at, 1.0, 0), 0.);
+
+        // Progress clamps at zero once the close duration elapses.
+        assert_eq!(
+            closing_progress(Duration::from_millis(1000), closed_at, 1.0, 200),
+            0.
+        );
     }
 
     #[test]

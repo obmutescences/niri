@@ -363,7 +363,8 @@ window-picker {
         }
     }
 
-    animation-ms 180
+    animation-ms-open 180
+    animation-ms-close 180
 }
 
 // Window rules let you adjust behavior for individual windows.

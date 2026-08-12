@@ -2471,7 +2471,8 @@ mod tests {
                         offset: 3.0,
                     },
                 },
-                animation_ms: 180,
+                animation_ms_open: 180,
+                animation_ms_close: 180,
             },
         }
         "#);
