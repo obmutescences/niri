@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
+use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -109,15 +110,17 @@ impl WindowPickerSession {
         })
     }
 
-    fn progress(&self, duration_ms: u16) -> f64 {
+    fn linear_progress(&self, duration_ms: u16) -> f64 {
         if duration_ms == 0 {
             return 1.;
         }
 
         let elapsed = self.clock.now().saturating_sub(self.opened_at);
-        let progress = elapsed.as_secs_f64() / (f64::from(duration_ms) / 1000.);
-        let progress = progress.clamp(0., 1.);
-        1. - (1. - progress).powi(3)
+        (elapsed.as_secs_f64() / (f64::from(duration_ms) / 1000.)).clamp(0., 1.)
+    }
+
+    fn progress(&self, duration_ms: u16) -> f64 {
+        ease_out_cubic(self.linear_progress(duration_ms))
     }
 
     fn animation_is_ongoing(&self, duration_ms: u16) -> bool {
@@ -125,6 +128,65 @@ impl WindowPickerSession {
             && self.clock.now().saturating_sub(self.opened_at)
                 < Duration::from_millis(u64::from(duration_ms))
     }
+}
+
+#[derive(Debug)]
+enum WindowPickerState {
+    Closed,
+    Open(WindowPickerSession),
+    Closing {
+        session: WindowPickerSession,
+        closed_at: Duration,
+        from_progress: f64,
+    },
+}
+
+impl WindowPickerState {
+    fn session(&self) -> Option<&WindowPickerSession> {
+        match self {
+            Self::Open(session) | Self::Closing { session, .. } => Some(session),
+            Self::Closed => None,
+        }
+    }
+
+    fn session_mut(&mut self) -> Option<&mut WindowPickerSession> {
+        match self {
+            Self::Open(session) | Self::Closing { session, .. } => Some(session),
+            Self::Closed => None,
+        }
+    }
+
+    fn progress(&self, duration_ms: u16) -> f64 {
+        match self {
+            Self::Open(session) => session.progress(duration_ms),
+            Self::Closing {
+                session,
+                closed_at,
+                from_progress,
+            } => {
+                if duration_ms == 0 {
+                    return 0.;
+                }
+
+                let elapsed = session.clock.now().saturating_sub(*closed_at);
+                let elapsed = elapsed.as_secs_f64() / (f64::from(duration_ms) / 1000.);
+                ease_out_cubic((from_progress - elapsed).clamp(0., 1.))
+            }
+            Self::Closed => 0.,
+        }
+    }
+
+    fn animation_is_ongoing(&self, duration_ms: u16) -> bool {
+        match self {
+            Self::Open(session) => session.animation_is_ongoing(duration_ms),
+            Self::Closing { .. } => true,
+            Self::Closed => false,
+        }
+    }
+}
+
+fn ease_out_cubic(progress: f64) -> f64 {
+    1. - (1. - progress).powi(3)
 }
 
 #[derive(Debug, Default)]
@@ -183,7 +245,7 @@ struct BackdropBuffers {
 }
 
 pub struct WindowPickerUi {
-    session: Option<WindowPickerSession>,
+    state: WindowPickerState,
     config: Rc<RefCell<Config>>,
     label_cache: RefCell<LabelCache>,
     backdrop_buffers: RefCell<HashMap<Output, BackdropBuffers>>,
@@ -199,7 +261,7 @@ pub enum WindowPickerKeyResult {
 impl WindowPickerUi {
     pub fn new(config: Rc<RefCell<Config>>) -> Self {
         Self {
-            session: None,
+            state: WindowPickerState::Closed,
             config,
             label_cache: RefCell::new(LabelCache::default()),
             backdrop_buffers: RefCell::new(HashMap::new()),
@@ -208,26 +270,70 @@ impl WindowPickerUi {
     }
 
     pub fn is_open(&self) -> bool {
-        self.session.is_some()
+        matches!(self.state, WindowPickerState::Open(_))
+    }
+
+    pub fn is_active(&self) -> bool {
+        !matches!(self.state, WindowPickerState::Closed)
     }
 
     pub fn output(&self) -> Option<&Output> {
-        self.session.as_ref().map(|session| &session.output)
+        self.state.session().map(|session| &session.output)
     }
 
     pub fn open(&mut self, session: WindowPickerSession) {
         self.label_cache.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
-        self.session = Some(session);
+        self.state = WindowPickerState::Open(session);
     }
 
     pub fn close(&mut self) -> bool {
-        let was_open = self.session.take().is_some();
-        if was_open {
-            self.backdrop_buffers.get_mut().clear();
+        let state = mem::replace(&mut self.state, WindowPickerState::Closed);
+        let WindowPickerState::Open(mut session) = state else {
+            let was_active = !matches!(state, WindowPickerState::Closed);
+            self.state = state;
+            return was_active;
+        };
+
+        let duration_ms = self.config.borrow().window_picker.animation_ms;
+        session.prefix = None;
+        let from_progress = session.linear_progress(duration_ms);
+        if duration_ms == 0 || from_progress == 0. {
+            self.finish_close();
+        } else {
+            let closed_at = session.clock.now();
+            self.state = WindowPickerState::Closing {
+                session,
+                closed_at,
+                from_progress,
+            };
             self.framebuffer_effect.get_mut().damage();
         }
-        was_open
+        true
+    }
+
+    pub fn close_immediately(&mut self) -> bool {
+        let was_active = self.is_active();
+        if was_active {
+            self.state = WindowPickerState::Closed;
+            self.finish_close();
+        }
+        was_active
+    }
+
+    fn finish_close(&mut self) {
+        self.backdrop_buffers.get_mut().clear();
+        self.framebuffer_effect.get_mut().damage();
+    }
+
+    pub fn advance_animations(&mut self) -> bool {
+        let duration_ms = self.config.borrow().window_picker.animation_ms;
+        let finished = matches!(self.state, WindowPickerState::Closing { .. })
+            && self.state.progress(duration_ms) <= 0.;
+        if finished {
+            self.close_immediately();
+        }
+        finished
     }
 
     pub fn update_config(&mut self) {
@@ -236,7 +342,7 @@ impl WindowPickerUi {
     }
 
     pub fn retain_windows(&mut self, live_ids: &HashSet<MappedId>) -> bool {
-        let Some(session) = &mut self.session else {
+        let Some(session) = self.state.session_mut() else {
             return false;
         };
 
@@ -253,20 +359,20 @@ impl WindowPickerUi {
         }
 
         if is_empty {
-            self.close();
+            self.close_immediately();
         }
         true
     }
 
     pub fn handle_key(&mut self, raw: Keysym) -> WindowPickerKeyResult {
-        let Some(session) = &mut self.session else {
-            return WindowPickerKeyResult::Handled;
-        };
-
         if raw == Keysym::Escape {
             self.close();
             return WindowPickerKeyResult::Handled;
         }
+
+        let WindowPickerState::Open(session) = &mut self.state else {
+            return WindowPickerKeyResult::Handled;
+        };
 
         if raw == Keysym::BackSpace {
             session.prefix = None;
@@ -324,7 +430,9 @@ impl WindowPickerUi {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<MappedId> {
-        let session = self.session.as_ref()?;
+        let WindowPickerState::Open(session) = &self.state else {
+            return None;
+        };
         if output != &session.output {
             return None;
         }
@@ -356,10 +464,8 @@ impl WindowPickerUi {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        let Some(session) = &self.session else {
-            return false;
-        };
-        session.animation_is_ongoing(self.config.borrow().window_picker.animation_ms)
+        self.state
+            .animation_is_ongoing(self.config.borrow().window_picker.animation_ms)
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -369,7 +475,7 @@ impl WindowPickerUi {
         mut ctx: RenderCtx<R>,
         push: &mut dyn FnMut(WindowPickerUiRenderElement<R>),
     ) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.state.session() else {
             return;
         };
         if ctx.target != RenderTarget::Output {
@@ -377,7 +483,7 @@ impl WindowPickerUi {
         }
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = session.progress(config.animation_ms);
+        let progress = self.state.progress(config.animation_ms);
         let alpha = progress as f32;
         let size = output_size(output);
         let scale = output.current_scale().fractional_scale();

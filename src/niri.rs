@@ -1998,7 +1998,7 @@ impl State {
             return;
         }
 
-        if self.niri.window_picker_ui.close() {
+        if self.niri.window_picker_ui.close_immediately() {
             self.niri.queue_redraw_all();
         }
 
@@ -3029,7 +3029,7 @@ impl Niri {
             .output()
             .is_some_and(|picker_output| picker_output == output)
         {
-            self.window_picker_ui.close();
+            self.window_picker_ui.close_immediately();
             self.queue_redraw_all();
         }
     }
@@ -3269,7 +3269,7 @@ impl Niri {
         if self.exit_confirm_dialog.is_open()
             || self.is_locked()
             || self.screenshot_ui.is_open()
-            || self.window_picker_ui.is_open()
+            || self.window_picker_ui.is_active()
         {
             return None;
         }
@@ -3307,7 +3307,7 @@ impl Niri {
             || self.is_locked()
             || self.screenshot_ui.is_open()
             || self.window_mru_ui.is_open()
-            || self.window_picker_ui.is_open()
+            || self.window_picker_ui.is_active()
         {
             return None;
         }
@@ -3389,7 +3389,7 @@ impl Niri {
 
         if self.screenshot_ui.is_open()
             || self.window_mru_ui.is_open()
-            || self.window_picker_ui.is_open()
+            || self.window_picker_ui.is_active()
         {
             return rv;
         }
@@ -4130,15 +4130,17 @@ impl Niri {
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
 
-        if self.window_picker_ui.is_open() {
+        let mut picker_changed = self.window_picker_ui.advance_animations();
+        if self.window_picker_ui.is_active() {
             let live_ids = self
                 .layout
                 .windows()
                 .map(|(_, mapped)| mapped.id())
                 .collect();
-            if self.window_picker_ui.retain_windows(&live_ids) {
-                self.queue_redraw_all();
-            }
+            picker_changed |= self.window_picker_ui.retain_windows(&live_ids);
+        }
+        if picker_changed {
+            self.queue_redraw_all();
         }
 
         for state in self.output_state.values_mut() {
@@ -5947,7 +5949,7 @@ impl Niri {
 
         info!("locking session");
 
-        if self.window_picker_ui.close() {
+        if self.window_picker_ui.close_immediately() {
             self.queue_redraw_all();
         }
 
@@ -6017,7 +6019,7 @@ impl Niri {
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());
                 self.cancel_mru();
-                self.window_picker_ui.close();
+                self.window_picker_ui.close_immediately();
 
                 if self.output_state.is_empty() {
                     // There are no outputs, lock the session right away.
@@ -6276,7 +6278,7 @@ impl Niri {
             return;
         }
 
-        if self.window_mru_ui.is_open() || self.window_picker_ui.is_open() {
+        if self.window_mru_ui.is_open() || self.window_picker_ui.is_active() {
             return;
         }
 

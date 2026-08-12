@@ -530,7 +530,7 @@ impl State {
                 // The window picker is a modal keyboard UI, but its own configured toggle bind
                 // remains available so pressing the shortcut again closes it. Modifier release
                 // never confirms or closes the picker.
-                if this.niri.window_picker_ui.is_open() {
+                if this.niri.window_picker_ui.is_active() {
                     // Keep Smithay's forwarded modifier state in sync while the picker owns
                     // keyboard focus. This lets a client regain focus while a modifier is still
                     // held (for example after pressing Mod+Tab again) and receive its later
@@ -770,7 +770,7 @@ impl State {
 
         match action {
             Action::Quit(skip_confirmation) => {
-                self.niri.window_picker_ui.close();
+                self.niri.window_picker_ui.close_immediately();
                 if !skip_confirmation && self.niri.exit_confirm_dialog.show() {
                     self.niri.queue_redraw_all();
                     return;
@@ -2359,12 +2359,12 @@ impl State {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
             Action::ToggleOverview => {
-                self.niri.window_picker_ui.close();
+                self.niri.window_picker_ui.close_immediately();
                 self.niri.layout.toggle_overview();
                 self.niri.queue_redraw_all();
             }
             Action::OpenOverview => {
-                self.niri.window_picker_ui.close();
+                self.niri.window_picker_ui.close_immediately();
                 if self.niri.layout.open_overview() {
                     self.niri.queue_redraw_all();
                 }
@@ -2459,7 +2459,7 @@ impl State {
                 scope,
                 filter,
             } => {
-                self.niri.window_picker_ui.close();
+                self.niri.window_picker_ui.close_immediately();
                 if self.niri.window_mru_ui.is_open() {
                     self.niri.window_mru_ui.advance(direction, filter);
                     self.niri.queue_redraw_mru_output();
@@ -2900,7 +2900,7 @@ impl State {
 
         // The picker remains modal, but a left click on a preview selects that window. All other
         // clicks are consumed so they cannot interact with the desktop behind the backdrop.
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             if button_state == ButtonState::Pressed {
                 let selected = if button == Some(MouseButton::Left) {
                     let location = pointer.current_location();
@@ -3250,7 +3250,7 @@ impl State {
     }
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -3767,7 +3767,7 @@ impl State {
             let time = event.time_msec();
             let serial = SERIAL_COUNTER.next_serial();
 
-            if self.niri.window_picker_ui.is_open() {
+            if self.niri.window_picker_ui.is_active() {
                 // Clear any previous tablet focus before emitting changed axes, so the modal
                 // picker cannot leak pressure or wheel events to the window below it.
                 tool.motion(
@@ -3793,7 +3793,7 @@ impl State {
             };
             tool.axis(self, frame);
 
-            if !self.niri.window_picker_ui.is_open() {
+            if !self.niri.window_picker_ui.is_active() {
                 tool.motion(
                     self,
                     under.surface,
@@ -3872,7 +3872,7 @@ impl State {
                                 self.niri.cancel_mru();
                             }
                         }
-                    } else if self.niri.window_picker_ui.is_open() {
+                    } else if self.niri.window_picker_ui.is_active() {
                         // Keep the tool's tip sequence balanced, but clear its surface focus so
                         // the press cannot interact with the desktop behind the picker.
                         tool.motion(
@@ -4063,7 +4063,8 @@ impl State {
                 return;
             }
 
-            if self.niri.window_picker_ui.is_open() && event.button_state() == ButtonState::Pressed
+            if self.niri.window_picker_ui.is_active()
+                && event.button_state() == ButtonState::Pressed
             {
                 self.niri.suppressed_buttons.insert(button);
                 return;
@@ -4118,7 +4119,7 @@ impl State {
     }
 
     fn on_gesture_swipe_begin<I: InputBackend>(&mut self, event: I::GestureSwipeBeginEvent) {
-        if self.niri.window_mru_ui.is_open() || self.niri.window_picker_ui.is_open() {
+        if self.niri.window_mru_ui.is_open() || self.niri.window_picker_ui.is_active() {
             // Don't start workspace or overview gestures while a window switcher is modal.
             return;
         }
@@ -4159,7 +4160,7 @@ impl State {
     ) where
         I::Device: 'static,
     {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4279,7 +4280,7 @@ impl State {
     }
 
     fn on_gesture_swipe_end<I: InputBackend>(&mut self, event: I::GestureSwipeEndEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4327,7 +4328,7 @@ impl State {
     }
 
     fn on_gesture_pinch_begin<I: InputBackend>(&mut self, event: I::GesturePinchBeginEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4349,7 +4350,7 @@ impl State {
     }
 
     fn on_gesture_pinch_update<I: InputBackend>(&mut self, event: I::GesturePinchUpdateEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4371,7 +4372,7 @@ impl State {
     }
 
     fn on_gesture_pinch_end<I: InputBackend>(&mut self, event: I::GesturePinchEndEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4393,7 +4394,7 @@ impl State {
     }
 
     fn on_gesture_hold_begin<I: InputBackend>(&mut self, event: I::GestureHoldBeginEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4415,7 +4416,7 @@ impl State {
     }
 
     fn on_gesture_hold_end<I: InputBackend>(&mut self, event: I::GestureHoldEndEvent) {
-        if self.niri.window_picker_ui.is_open() {
+        if self.niri.window_picker_ui.is_active() {
             return;
         }
 
@@ -4516,7 +4517,7 @@ impl State {
                     self.niri.cancel_mru();
                 }
             }
-        } else if self.niri.window_picker_ui.is_open() {
+        } else if self.niri.window_picker_ui.is_active() {
             // The picker is keyboard-only. The touch sequence is still sent with no surface below
             // so a later up/cancel remains balanced, but it must not activate an output or window.
         } else if !handle.is_grabbed() {
