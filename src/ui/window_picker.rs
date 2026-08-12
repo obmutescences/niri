@@ -32,7 +32,7 @@ use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
-use crate::render_helpers::{RenderCtx, RenderTarget};
+use crate::render_helpers::RenderCtx;
 use crate::utils::{output_size, to_physical_precise_round};
 use crate::window::mapped::MappedId;
 use crate::window::Mapped;
@@ -494,9 +494,6 @@ impl WindowPickerUi {
         let Some(session) = self.state.session() else {
             return;
         };
-        if ctx.target != RenderTarget::Output {
-            return;
-        }
 
         let config = self.config.borrow().window_picker.clone();
         let progress = self
