@@ -116,6 +116,26 @@ layout {
 }
 ```
 
+### UI Sound Effects
+
+Optional feedback sounds for window open/close, keyboard focus changes and workspace switches, played through PipeWire's `pw-play` so playback never blocks the compositor. Every event is opt-in — it only plays if you point it at an audio file. Paths are passed straight to `pw-play`, so they **must be absolute** (`~` is not expanded; avoid relative paths):
+
+```kdl
+sounds {
+    window-open "/home/yourname/.config/niri/sounds/open.ogg"
+    window-close "/home/yourname/.config/niri/sounds/close.ogg"
+    focus-change "/home/yourname/.config/niri/sounds/focus.ogg"
+    workspace-switch "/home/yourname/.config/niri/sounds/switch.ogg"
+
+    // Uncomment to mute everything without removing the paths.
+    // off
+}
+```
+
+A set of ready-made sounds ships in [`resources/sounds/`](resources/sounds) (`open`, `close`, `focus`, `switch`, plus `special_switch` as a longer alternative) — copy them somewhere stable like `~/.config/niri/sounds/` and reference them by absolute path, or use your own files. Supported formats are whatever `pw-play` decodes through libsndfile: **WAV, FLAC, OGG/Vorbis, Opus**; MP3 support depends on your libsndfile build.
+
+Rapid events don't spam: same-kind sounds are rate-limited, and the focus-change sound stays silent for a short moment after an open/close so a single action never plays two overlapping cues.
+
 ## About
 
 Windows are arranged in columns on an infinite strip going to the right.
@@ -137,8 +157,8 @@ When a monitor disconnects, its workspaces will move to another monitor, but upo
 - An [Overview](https://github.com/user-attachments/assets/379a5d1f-acdb-4c11-b36c-e85fd91f0995) that zooms out workspaces and windows
 - Built-in screenshot UI
 - Monitor and window screencasting through xdg-desktop-portal-gnome
-    - You can [block out](https://niri-wm.github.io/niri/Configuration%3A-Window-Rules.html#block-out-from) sensitive windows from screencasts
-    - [Dynamic cast target](https://niri-wm.github.io/niri/Screencasting.html#dynamic-screencast-target) that can change what it shows on the go
+  - You can [block out](https://niri-wm.github.io/niri/Configuration%3A-Window-Rules.html#block-out-from) sensitive windows from screencasts
+  - [Dynamic cast target](https://niri-wm.github.io/niri/Screencasting.html#dynamic-screencast-target) that can change what it shows on the go
 - [Touchpad](https://github.com/niri-wm/niri/assets/1794388/946a910e-9bec-4cd1-a923-4a9421707515) and [mouse](https://github.com/niri-wm/niri/assets/1794388/8464e65d-4bf2-44fa-8c8e-5883355bd000) gestures
 - Group windows into [tabs](https://niri-wm.github.io/niri/Tabs.html)
 - Configurable layout: gaps, borders, struts, window sizes
@@ -174,27 +194,27 @@ Here are some points you may have questions about:
 - **NVIDIA**: seems to work fine.
 - **Floating windows**: yes, starting from niri 25.01.
 - **Input devices**: niri supports tablets, touchpads, and touchscreens.
-You can map the tablet to a specific monitor, or use [OpenTabletDriver].
-We have touchpad gestures, but no touchscreen gestures yet.
+  You can map the tablet to a specific monitor, or use [OpenTabletDriver].
+  We have touchpad gestures, but no touchscreen gestures yet.
 - **Wlr protocols**: yes, we have most of the important ones like layer-shell, gamma-control, screencopy.
-You can check on [wayland.app](https://wayland.app) at the bottom of each protocol's page.
+  You can check on [wayland.app](https://wayland.app) at the bottom of each protocol's page.
 - **Performance**: while I run niri on beefy machines, I try to stay conscious of performance.
-I've seen someone use it fine on an Eee PC 900 from 2008, of all things.
+  I've seen someone use it fine on an Eee PC 900 from 2008, of all things.
 - **Xwayland**: [integrated](https://niri-wm.github.io/niri/Xwayland.html#using-xwayland-satellite) via xwayland-satellite starting from niri 25.08.
 
 ## Media
 
-[niri: Making a Wayland compositor in Rust](https://youtu.be/Kmz8ODolnDg?list=PLRdS-n5seLRqrmWDQY4KDqtRMfIwU0U3T) · *December 2024*
+[niri: Making a Wayland compositor in Rust](https://youtu.be/Kmz8ODolnDg?list=PLRdS-n5seLRqrmWDQY4KDqtRMfIwU0U3T) · _December 2024_
 
 My talk from the 2024 Moscow RustCon about niri, and how I do randomized property testing and profiling, and measure input latency.
 The talk is in Russian, but I prepared full English subtitles that you can find in YouTube's subtitle language selector.
 
-[An interview with Ivan, the developer behind Niri](https://www.trommelspeicher.de/podcast/special_the_developer_behind_niri) · *June 2025*
+[An interview with Ivan, the developer behind Niri](https://www.trommelspeicher.de/podcast/special_the_developer_behind_niri) · _June 2025_
 
 An interview by a German tech podcast Das Triumvirat (in English).
 We talk about niri development and history, and my experience building and maintaining niri.
 
-[A tour of the niri scrolling-tiling Wayland compositor](https://lwn.net/Articles/1025866/) · *July 2025*
+[A tour of the niri scrolling-tiling Wayland compositor](https://lwn.net/Articles/1025866/) · _July 2025_
 
 An LWN article with a nice overview and introduction to niri.
 

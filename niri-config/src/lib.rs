@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod sounds;
 pub mod utils;
 pub mod window_picker;
 pub mod window_rule;
@@ -58,6 +59,7 @@ pub use crate::misc::*;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
+pub use crate::sounds::Sounds;
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_picker::{WindowPicker, WindowPickerLabel};
@@ -95,6 +97,7 @@ pub struct Config {
     pub workspaces: Vec<Workspace>,
     pub recent_windows: RecentWindows,
     pub window_picker: WindowPicker,
+    pub sounds: Sounds,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +207,7 @@ where
                 "gestures" => m_merge!(gestures),
                 "overview" => m_merge!(overview),
                 "window-picker" => m_merge!(window_picker),
+                "sounds" => m_merge!(sounds),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
@@ -2478,6 +2482,13 @@ mod tests {
                 },
                 animation_ms_open: 180,
                 animation_ms_close: 180,
+            },
+            sounds: Sounds {
+                on: true,
+                window_open: None,
+                window_close: None,
+                focus_change: None,
+                workspace_switch: None,
             },
         }
         "#);
