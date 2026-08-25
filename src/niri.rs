@@ -1294,6 +1294,10 @@ impl State {
             {
                 if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(surface) {
                     mapped.set_is_focused(true);
+                    crate::sounds::play(
+                        &self.niri.config.borrow().sounds,
+                        crate::sounds::Kind::FocusChange,
+                    );
 
                     // If `mapped` does not have a focus timestamp, then the window is newly
                     // created/mapped and a timestamp is unconditionally created.

@@ -498,6 +498,8 @@ impl<W: LayoutElement> Monitor<W> {
                     return;
                 }
 
+                crate::sounds::play(&self.options.sounds, crate::sounds::Kind::WorkspaceSwitch);
+
                 self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
                     self.clock.clone(),
                     current_idx,
@@ -2226,6 +2228,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         if self.active_workspace_idx != new_idx {
             self.previous_workspace_id = Some(self.workspaces[self.active_workspace_idx].id());
+            crate::sounds::play(&self.options.sounds, crate::sounds::Kind::WorkspaceSwitch);
         }
 
         self.active_workspace_idx = new_idx;
