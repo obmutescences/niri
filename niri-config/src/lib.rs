@@ -1455,6 +1455,7 @@ mod tests {
                 workspace_dip: WorkspaceDip {
                     enabled: false,
                     strength: 0.04,
+                    anim: None,
                 },
                 preset_column_widths: [
                     Proportion(

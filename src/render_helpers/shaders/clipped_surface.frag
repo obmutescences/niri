@@ -40,6 +40,7 @@ uniform float lg_glow_edge0;
 uniform float lg_glow_edge1;
 uniform float lg_edge_lighting;
 uniform float lg_fringing;
+uniform float lg_bevel_width;
 
 float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 vec4 postprocess(vec4 color);
@@ -71,6 +72,7 @@ GlassFragment glass_refraction(
     float edge_factor,
     float concave_factor,
     float refraction_strength,
+    float refraction_power,
     float refraction_rgb_fringing
 ) {
     const float h = 1.0;
@@ -82,7 +84,7 @@ GlassFragment glass_refraction(
     );
 
     vec2 normal = length(gradient) > 0.0 ? -normalize(gradient) : vec2(0.0, 1.0);
-    float final_strength = min(0.4 * concave_factor * refraction_strength, 1.0);
+    float final_strength = min(0.4 * concave_factor * refraction_strength * refraction_power, 1.5);
 
     vec2 refract_offset_g = -normal.xy * final_strength;
     vec2 refract_offset_r = -normal.xy * final_strength;
@@ -127,9 +129,10 @@ GlassFragment snells_refraction(
     float refraction_strength,
     float refraction_bevel_intensity,
     float refraction_offset_strength,
-    float refraction_rgb_fringing
+    float refraction_rgb_fringing,
+    float bevel_width
 ) {
-    float band_width = max(min_half_size * 0.15, 4.0);
+    float band_width = max(min_half_size * 0.15 * bevel_width, 4.0);
     float ior = 1.0 + refraction_strength * 0.5;
 
     float min_r = min(min(radius.x, radius.y), min(radius.z, radius.w));
@@ -244,7 +247,8 @@ vec4 glass_effect(
     float refraction_bevel_intensity,
     float physically_based_refraction,
     float glow_strength,
-    float edge_lighting
+    float edge_lighting,
+    float bevel_width
 ) {
     vec2 half_size = blur_size * 0.5;
     float min_half_size = min(half_size.x, half_size.y);
@@ -257,8 +261,8 @@ vec4 glass_effect(
         return base_color;
     }
 
-    float min_eps = clamp(min_half_size * 0.15, 0.1, min_half_size * 0.9);
-    float edge_factor = 1.0 - clamp(abs(dist) / min_eps, 0.0, 1.0);
+    float band_width = clamp(min_half_size * 0.15 * bevel_width, 0.1, min_half_size * 0.9);
+    float edge_factor = 1.0 - clamp(abs(dist) / band_width, 0.0, 1.0);
     float concave_factor = 1.0
         - sqrt(1.0 - pow(smoothstep(0.0, 1.0, edge_factor), refraction_normal_pow));
 
@@ -275,6 +279,7 @@ vec4 glass_effect(
                 edge_factor,
                 concave_factor,
                 refraction_strength,
+                refraction_offset_strength,
                 refraction_rgb_fringing
             )
             : snells_refraction(
@@ -289,7 +294,8 @@ vec4 glass_effect(
                 refraction_strength,
                 refraction_bevel_intensity,
                 refraction_offset_strength,
-                refraction_rgb_fringing
+                refraction_rgb_fringing,
+                bevel_width
             );
     } else {
         sample = GlassFragment(
@@ -343,7 +349,8 @@ void main() {
             lg_refraction_power,
             lg_physical_refraction,
             lg_glow_weight,
-            lg_edge_lighting
+            lg_edge_lighting,
+            lg_bevel_width
         );
     }
 

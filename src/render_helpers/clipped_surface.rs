@@ -110,6 +110,7 @@ impl<R: NiriRenderer> ClippedSurfaceRenderElement<R> {
             Uniform::new("lg_glow_edge1", 0.0f32),
             Uniform::new("lg_edge_lighting", 1.0f32),
             Uniform::new("lg_fringing", 0.3f32),
+            Uniform::new("lg_bevel_width", 1.0f32),
         ]
     }
 

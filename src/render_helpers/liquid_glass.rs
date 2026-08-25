@@ -11,6 +11,8 @@ pub struct LiquidGlassOptions {
     pub glow_bias: f64,
     pub glow_edge0: f64,
     pub glow_edge1: f64,
+    pub bevel_width: f64,
+    pub fringing: f64,
 }
 
 impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
@@ -27,6 +29,8 @@ impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
             glow_bias: config.glow_bias,
             glow_edge0: config.glow_edge0,
             glow_edge1: config.glow_edge1,
+            bevel_width: config.bevel_width,
+            fringing: config.fringing,
         }
     }
 }

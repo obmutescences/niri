@@ -401,6 +401,10 @@ pub struct LiquidGlass {
     pub glow_bias: f64,
     pub glow_edge0: f64,
     pub glow_edge1: f64,
+    /// Multiplier for the width of the edge band where refraction happens.
+    pub bevel_width: f64,
+    /// RGB chromatic aberration amount at the edges.
+    pub fringing: f64,
 }
 
 impl Default for LiquidGlass {
@@ -412,11 +416,13 @@ impl Default for LiquidGlass {
             refraction_b: 5.0,
             refraction_c: 5.0,
             refraction_d: 8.0,
-            refraction_power: 0.6,
+            refraction_power: 1.0,
             glow_weight: 0.08,
             glow_bias: 0.0,
             glow_edge0: 0.3,
             glow_edge1: 0.9,
+            bevel_width: 1.0,
+            fringing: 0.3,
         }
     }
 }
@@ -445,6 +451,10 @@ pub struct LiquidGlassPart {
     pub glow_edge0: Option<FloatOrInt<-100, 100>>,
     #[knuffel(child, unwrap(argument))]
     pub glow_edge1: Option<FloatOrInt<-100, 100>>,
+    #[knuffel(child, unwrap(argument))]
+    pub bevel_width: Option<FloatOrInt<0, 20>>,
+    #[knuffel(child, unwrap(argument))]
+    pub fringing: Option<FloatOrInt<0, 10>>,
 }
 
 impl MergeWith<LiquidGlassPart> for LiquidGlass {
@@ -462,6 +472,8 @@ impl MergeWith<LiquidGlassPart> for LiquidGlass {
             glow_bias,
             glow_edge0,
             glow_edge1,
+            bevel_width,
+            fringing,
         );
     }
 }
@@ -1448,6 +1460,9 @@ mod tests {
                     liquid-glass {
                         refraction-strength 1.0
                         power-factor 3.0
+                        refraction-power 1.5
+                        bevel-width 2.5
+                        fringing 0.6
                     }
                 }
             }
@@ -1459,6 +1474,21 @@ mod tests {
         let lg = rule.background_effect.liquid_glass.unwrap();
         assert_eq!(lg.refraction_strength, Some(FloatOrInt(1.0)));
         assert_eq!(lg.power_factor, Some(FloatOrInt(3.0)));
+        assert_eq!(lg.refraction_power, Some(FloatOrInt(1.5)));
+        assert_eq!(lg.bevel_width, Some(FloatOrInt(2.5)));
+        assert_eq!(lg.fringing, Some(FloatOrInt(0.6)));
+    }
+
+    #[test]
+    fn liquid_glass_defaults() {
+        let lg = LiquidGlass::default();
+        assert_eq!(lg.refraction_power, 1.0);
+        assert_eq!(lg.bevel_width, 1.0);
+        assert_eq!(lg.fringing, 0.3);
+
+        // Defaults must be a no-op relative to the previous hardcoded behavior:
+        // fringing used to always be 0.3, and there was no power multiplier.
+        assert!((lg.fringing - 0.3).abs() < f64::EPSILON);
     }
 }
 
