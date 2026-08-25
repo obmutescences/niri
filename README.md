@@ -118,21 +118,21 @@ layout {
 
 ### UI Sound Effects
 
-Optional feedback sounds for window open/close, keyboard focus changes and workspace switches, played through PipeWire's `pw-play` so playback never blocks the compositor. Every event is opt-in — it only plays if you point it at an audio file (`~` is expanded):
+Optional feedback sounds for window open/close, keyboard focus changes and workspace switches, played through PipeWire's `pw-play` so playback never blocks the compositor. Every event is opt-in — it only plays if you point it at an audio file. Paths are passed straight to `pw-play`, so they **must be absolute** (`~` is not expanded; avoid relative paths):
 
 ```kdl
 sounds {
-    window-open "~/sounds/open.ogg"
-    window-close "~/sounds/close.ogg"
-    focus-change "~/sounds/focus.ogg"
-    workspace-switch "~/sounds/switch.ogg"
+    window-open "/home/yourname/.config/niri/sounds/open.ogg"
+    window-close "/home/yourname/.config/niri/sounds/close.ogg"
+    focus-change "/home/yourname/.config/niri/sounds/focus.ogg"
+    workspace-switch "/home/yourname/.config/niri/sounds/switch.ogg"
 
     // Uncomment to mute everything without removing the paths.
     // off
 }
 ```
 
-A set of ready-made sounds ships in [`resources/sounds/`](resources/sounds) (`open`, `close`, `focus`, `switch`, plus `special_switch` as a longer alternative) — copy them somewhere stable like `~/sounds/` or use your own files. Supported formats are whatever `pw-play` decodes through libsndfile: **WAV, FLAC, OGG/Vorbis, Opus**; MP3 support depends on your libsndfile build.
+A set of ready-made sounds ships in [`resources/sounds/`](resources/sounds) (`open`, `close`, `focus`, `switch`, plus `special_switch` as a longer alternative) — copy them somewhere stable like `~/.config/niri/sounds/` and reference them by absolute path, or use your own files. Supported formats are whatever `pw-play` decodes through libsndfile: **WAV, FLAC, OGG/Vorbis, Opus**; MP3 support depends on your libsndfile build.
 
 Rapid events don't spam: same-kind sounds are rate-limited, and the focus-change sound stays silent for a short moment after an open/close so a single action never plays two overlapping cues.
 

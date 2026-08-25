@@ -387,12 +387,12 @@ window-picker {
 }
 
 // UI sound effects, played through PipeWire (pw-play).
-// Paths support ~ expansion; each event is opt-in by setting a path.
+// Paths must be absolute (~ is NOT expanded); each event is opt-in by setting a path.
 // sounds {
-//     window-open "~/sounds/open.ogg"
-//     window-close "~/sounds/close.ogg"
-//     focus-change "~/sounds/focus.ogg"
-//     workspace-switch "~/sounds/switch.ogg"
+//     window-open "/home/user/.config/niri/sounds/open.ogg"
+//     window-close "/home/user/.config/niri/sounds/close.ogg"
+//     focus-change "/home/user/.config/niri/sounds/focus.ogg"
+//     workspace-switch "/home/user/.config/niri/sounds/switch.ogg"
 //
 //     // Uncomment to silence without removing the paths.
 //     // off
