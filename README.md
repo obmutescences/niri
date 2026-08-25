@@ -12,7 +12,132 @@
 
 <img width="1280" height="720" alt="niri with a few windows open" src="https://github.com/user-attachments/assets/dea5909e-1859-4aaa-9d88-d37f9663e00b" />
 
+## Extra Features in This Fork
+
+This repository is a feature fork of [niri](https://github.com/niri-wm/niri). On top of upstream it adds the following features.
+
+### Liquid Glass
+
+A physical-looking glass effect for windows and layer-shell surfaces, applied through `background-effect` in `window-rule` / `layer-rule`. It composes with the usual `opacity`, `blur`, `noise`, `saturation` and `xray` options, so you can keep a translucent tinted look while adding refraction, edge highlights and chromatic fringing:
+
+```kdl
+window-rule {
+    opacity 0.7
+    background-effect {
+        blur true
+        xray false
+        saturation 1.2
+        liquid-glass {
+            refraction-strength 20   // how hard light bends at the edges (saturates at 20)
+            power-factor 1.5         // curvature falloff across the bevel (1 = widest, range 1-10)
+            refraction-power 1.8     // overall refraction intensity multiplier (>1 for stronger bend)
+            bevel-width 2.5          // width multiplier of the edge band where the effect lives
+            fringing 0.6             // RGB chromatic aberration at the edges
+            glow-weight 0.08         // specular highlight intensity
+        }
+    }
+}
+```
+
+`bevel-width` has the biggest visual impact: values above 1 widen the glass band around the window border, making the effect cover more area instead of just a thin rim.
+
+### Keyboard-Driven Window Picker
+
+A Super+Tab style overlay for switching windows by keyboard, rendered above a dimmed, blurred backdrop of the whole screen. Previews are laid out in a grid, navigable with arrow keys, and animate open/close. Toggle it with the `toggle-window-picker` action:
+
+```kdl
+binds {
+    Mod+Tab repeat=false { toggle-window-picker; }
+}
+```
+
+The picker is configurable under `window-picker`, including grid size, preview scaling, label styling, and the backdrop treatment:
+
+```kdl
+window-picker {
+    area-width 0.8       // fraction of the output covered by the grid
+    area-height 0.7
+    max-scale 0.3        // maximum preview scale relative to real window size
+    gap 16
+
+    label {
+        font "sans-serif"
+        size 14
+        corner-radius 8
+    }
+
+    backdrop {
+        brightness 0.55  // dim the rest of the screen
+        saturation 0.6
+        blur {
+            on
+            passes 3
+        }
+    }
+}
+```
+
+### Workspace Switch Zoom Dip
+
+An optional subtle zoom-out while a workspace switch animation runs: the view dips slightly towards the middle of the transition and settles back to 1.0, adding a sense of depth. Disabled by default; enable it under `layout`:
+
+```kdl
+layout {
+    workspace-dip {
+        on
+        strength 0.04    // zoom-out amount at the deepest point (range 0-1)
+
+        // Optional: give the dip its own two-phase timing (shrink, then expand).
+        // Without these the dip follows the workspace-switch animation progress.
+        duration-ms 300
+        curve ease-out-cubic
+        // spring damping-ratio=0.55 stiffness=350 epsilon=0.0001
+    }
+}
+```
+
+### Focus Animation
+
+A brief scale "flash" when a window gains keyboard focus, making focus changes easy to track. Configured per-layout, with easing or spring timing:
+
+```kdl
+layout {
+    focus-animation {
+        on
+        duration-ms 200
+        curve ease-out-quad
+        scale {
+            on
+            flash-scale 0.95    // <1 shrinks first, >1 expands first
+            disable-on-solo true
+            disable-on-floating true
+        }
+    }
+}
+```
+
+### UI Sound Effects
+
+Optional feedback sounds for window open/close, keyboard focus changes and workspace switches, played through PipeWire's `pw-play` so playback never blocks the compositor. Every event is opt-in — it only plays if you point it at an audio file (`~` is expanded):
+
+```kdl
+sounds {
+    window-open "~/sounds/open.ogg"
+    window-close "~/sounds/close.ogg"
+    focus-change "~/sounds/focus.ogg"
+    workspace-switch "~/sounds/switch.ogg"
+
+    // Uncomment to mute everything without removing the paths.
+    // off
+}
+```
+
+A set of ready-made sounds ships in [`resources/sounds/`](resources/sounds) (`open`, `close`, `focus`, `switch`, plus `special_switch` as a longer alternative) — copy them somewhere stable like `~/sounds/` or use your own files. Supported formats are whatever `pw-play` decodes through libsndfile: **WAV, FLAC, OGG/Vorbis, Opus**; MP3 support depends on your libsndfile build.
+
+Rapid events don't spam: same-kind sounds are rate-limited, and the focus-change sound stays silent for a short moment after an open/close so a single action never plays two overlapping cues.
+
 ## About
+
 
 Windows are arranged in columns on an infinite strip going to the right.
 Opening a new window never causes existing windows to resize.
