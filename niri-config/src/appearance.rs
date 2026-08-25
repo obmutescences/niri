@@ -1695,6 +1695,342 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkspaceDip {
+    pub enabled: bool,
+    pub strength: f64,
+    /// Independent dip animation timing.
+    ///
+    /// When `None`, the dip follows the workspace switch animation progress
+    /// (`sin(pi * progress)`), guaranteeing perfect sync. When set, the dip runs its own
+    /// two-phase (shrink then expand) animation.
+    pub anim: Option<Animation>,
+}
+
+impl Default for WorkspaceDip {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strength: 0.04,
+            anim: None,
+        }
+    }
+}
+
+impl MergeWith<WorkspaceDipPart> for WorkspaceDip {
+    fn merge_with(&mut self, part: &WorkspaceDipPart) {
+        if part.off {
+            self.enabled = false;
+        } else if part.on {
+            self.enabled = true;
+        }
+
+        if let Some(strength) = part.strength {
+            self.strength = strength.0.clamp(0., 1.);
+        }
+
+        self.anim = part.anim;
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct WorkspaceDipPart {
+    pub off: bool,
+    pub on: bool,
+    pub strength: Option<FloatOrInt<0, 1>>,
+    pub anim: Option<Animation>,
+}
+
+impl<S> knuffel::Decode<S> for WorkspaceDipPart
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        use knuffel::traits::DecodeScalar;
+
+        expect_only_children(node, ctx);
+
+        let mut off = false;
+        let mut on = false;
+        let mut strength = None;
+        let mut easing_params = None;
+        let mut spring_params = None;
+
+        for child in node.children() {
+            match &**child.node_name {
+                "off" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    off = true;
+                }
+                "on" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    on = true;
+                }
+                "strength" => {
+                    strength = Some(parse_arg_node("strength", child, ctx)?);
+                }
+                "spring" => {
+                    if easing_params.is_some() {
+                        ctx.emit_error(DecodeError::unexpected(
+                            child,
+                            "node",
+                            "cannot set both spring and easing parameters at once",
+                        ));
+                    }
+                    let mut damping_ratio = None;
+                    let mut stiffness = None;
+                    let mut epsilon = None;
+                    for (name, val) in &child.properties {
+                        match &***name {
+                            "damping-ratio" => {
+                                damping_ratio = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            "stiffness" => {
+                                stiffness = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            "epsilon" => {
+                                epsilon = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            _ => (),
+                        }
+                    }
+                    let damping_ratio = damping_ratio.unwrap_or(0.6);
+                    let stiffness = stiffness.unwrap_or(400);
+                    let epsilon = epsilon.unwrap_or(0.0001);
+                    spring_params = Some(SpringParams {
+                        damping_ratio,
+                        stiffness,
+                        epsilon,
+                    });
+                }
+                "duration-ms" => {
+                    if spring_params.is_some() {
+                        ctx.emit_error(DecodeError::unexpected(
+                            child,
+                            "node",
+                            "cannot set both spring and easing parameters at once",
+                        ));
+                    }
+                    let duration_ms: u32 = parse_arg_node("duration-ms", child, ctx)?;
+                    easing_params = Some(EasingParams {
+                        duration_ms,
+                        curve: Curve::EaseOutQuad,
+                    });
+                }
+                "curve" => {
+                    if spring_params.is_some() {
+                        ctx.emit_error(DecodeError::unexpected(
+                            child,
+                            "node",
+                            "cannot set both spring and easing parameters at once",
+                        ));
+                    }
+                    let mut iter_args = child.arguments.iter();
+                    let val = iter_args.next().ok_or_else(|| {
+                        DecodeError::missing(child, "additional argument `curve` is required")
+                    })?;
+                    let curve_string: String = DecodeScalar::decode(val, ctx)?;
+
+                    let curve = match curve_string.as_str() {
+                        "linear" => Curve::Linear,
+                        "ease-out-quad" => Curve::EaseOutQuad,
+                        "ease-out-cubic" => Curve::EaseOutCubic,
+                        "ease-out-expo" => Curve::EaseOutExpo,
+                        "cubic-bezier" => {
+                            let x1: FloatOrInt<0, 1> =
+                                DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let y1: FloatOrInt<{ i32::MIN }, { i32::MAX }> =
+                                DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let x2: FloatOrInt<0, 1> =
+                                DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            let y2: FloatOrInt<{ i32::MIN }, { i32::MAX }> =
+                                DecodeScalar::decode(iter_args.next().unwrap(), ctx)?;
+                            Curve::CubicBezier(x1.0, y1.0, x2.0, y2.0)
+                        }
+                        unexpected => {
+                            ctx.emit_error(DecodeError::unexpected(
+                                &val.literal,
+                                "argument",
+                                format!("unexpected animation curve `{unexpected}`"),
+                            ));
+                            Curve::EaseOutQuad
+                        }
+                    };
+
+                    // Preserve a previously set duration-ms.
+                    let duration_ms = easing_params
+                        .map_or(200, |p| p.duration_ms);
+                    easing_params = Some(EasingParams {
+                        duration_ms,
+                        curve,
+                    });
+                }
+                name_str => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        child,
+                        "node",
+                        format!("unexpected node `{}`", name_str.escape_default()),
+                    ));
+                }
+            }
+        }
+
+        let anim = if let Some(p) = spring_params {
+            Some(Animation {
+                off: false,
+                kind: Kind::Spring(p),
+            })
+        } else {
+            easing_params.map(|p| Animation {
+                off: false,
+                kind: Kind::Easing(p),
+            })
+        };
+
+        Ok(Self {
+            off,
+            on,
+            strength,
+            anim,
+        })
+    }
+}
+
+#[cfg(test)]
+mod workspace_dip_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_dip_default_off() {
+        let config = r#"
+            layout {
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        assert!(!parsed.layout.workspace_dip.enabled);
+        assert_eq!(parsed.layout.workspace_dip.strength, 0.04);
+    }
+
+    #[test]
+    fn workspace_dip_parsing() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    on
+                    strength 0.06
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        assert!(parsed.layout.workspace_dip.enabled);
+        assert_eq!(parsed.layout.workspace_dip.strength, 0.06);
+    }
+
+    #[test]
+    fn workspace_dip_off_wins() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    on
+                    strength 0.06
+                    off
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        assert!(!parsed.layout.workspace_dip.enabled);
+        assert_eq!(parsed.layout.workspace_dip.strength, 0.06);
+    }
+
+    #[test]
+    fn workspace_dip_strength_out_of_range_rejected() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    strength 5
+                }
+            }
+        "#;
+        assert!(crate::Config::parse_mem(config).is_err());
+    }
+
+    #[test]
+    fn workspace_dip_default_has_no_own_timing() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    on
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        assert!(parsed.layout.workspace_dip.enabled);
+        assert!(parsed.layout.workspace_dip.anim.is_none());
+    }
+
+    #[test]
+    fn workspace_dip_easing_parsing() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    on
+                    strength 0.06
+                    duration-ms 300
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let dip = parsed.layout.workspace_dip;
+        assert!(dip.enabled);
+        assert_eq!(dip.anim, Some(Animation {
+            off: false,
+            kind: Kind::Easing(EasingParams {
+                duration_ms: 300,
+                curve: Curve::EaseOutQuad,
+            }),
+        }));
+    }
+
+    #[test]
+    fn workspace_dip_spring_parsing() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    on
+                    spring damping-ratio=0.55 stiffness=350 epsilon=0.001
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let dip = parsed.layout.workspace_dip;
+        assert!(dip.enabled);
+        assert_eq!(dip.anim, Some(Animation {
+            off: false,
+            kind: Kind::Spring(SpringParams {
+                damping_ratio: 0.55,
+                stiffness: 350,
+                epsilon: 0.001,
+            }),
+        }));
+    }
+
+    #[test]
+    fn workspace_dip_spring_and_duration_conflict() {
+        let config = r#"
+            layout {
+                workspace-dip {
+                    spring damping-ratio=0.5 stiffness=400 epsilon=0.0001
+                    duration-ms 300
+                }
+            }
+        "#;
+        assert!(crate::Config::parse_mem(config).is_err());
+    }
+}
+
 #[cfg(test)]
 mod focus_animation_tests {
     use super::*;

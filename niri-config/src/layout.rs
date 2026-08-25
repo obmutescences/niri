@@ -2,13 +2,13 @@ use knuffel::errors::DecodeError;
 use niri_ipc::{ColumnDisplay, SizeChange};
 
 use crate::appearance::{
-    Blur, Border, FocusAnimation, FocusRing, InsertHint, Shadow, TabIndicator,
+    Blur, Border, FocusAnimation, FocusRing, InsertHint, Shadow, TabIndicator, WorkspaceDip,
     DEFAULT_BACKGROUND_COLOR,
 };
 use crate::utils::{expect_only_children, Flag, MergeWith};
 use crate::{
     BlurPart, BorderRule, Color, FloatOrInt, FocusAnimationPart, FocusScalePart, InsertHintPart,
-    ShadowRule, TabIndicatorPart,
+    ShadowRule, TabIndicatorPart, WorkspaceDipPart,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +20,7 @@ pub struct Layout {
     pub tab_indicator: TabIndicator,
     pub insert_hint: InsertHint,
     pub focus_animation: FocusAnimation,
+    pub workspace_dip: WorkspaceDip,
     pub preset_column_widths: Vec<PresetSize>,
     pub default_column_width: Option<PresetSize>,
     pub preset_window_heights: Vec<PresetSize>,
@@ -42,6 +43,7 @@ impl Default for Layout {
             tab_indicator: TabIndicator::default(),
             insert_hint: InsertHint::default(),
             focus_animation: FocusAnimation::default(),
+            workspace_dip: WorkspaceDip::default(),
             preset_column_widths: vec![
                 PresetSize::Proportion(1. / 3.),
                 PresetSize::Proportion(0.5),
@@ -87,6 +89,10 @@ impl MergeWith<LayoutPart> for Layout {
             self.focus_animation.merge_with(focus_animation);
         }
 
+        if let Some(workspace_dip) = &part.workspace_dip {
+            self.workspace_dip.merge_with(workspace_dip);
+        }
+
         merge_clone!(
             (self, part),
             preset_column_widths,
@@ -129,6 +135,8 @@ pub struct LayoutPart {
     pub focus_scale: Option<FocusScalePart>,
     #[knuffel(child)]
     pub focus_animation: Option<FocusAnimationPart>,
+    #[knuffel(child)]
+    pub workspace_dip: Option<WorkspaceDipPart>,
     #[knuffel(child, unwrap(children))]
     pub preset_column_widths: Option<Vec<PresetSize>>,
     #[knuffel(child)]

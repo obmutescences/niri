@@ -1452,6 +1452,10 @@ mod tests {
                         disable_on_floating: false,
                     },
                 },
+                workspace_dip: WorkspaceDip {
+                    enabled: false,
+                    strength: 0.04,
+                },
                 preset_column_widths: [
                     Proportion(
                         0.25,

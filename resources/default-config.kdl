@@ -275,6 +275,25 @@ layout {
         }
     }
 
+    // Slight zoom-out "dip" while a workspace switch animation is running.
+    // The zoom starts and ends at 1.0, reaching the minimum in the middle of
+    // the switch. Does nothing while the overview is open or animating.
+    workspace-dip {
+        // Uncomment this line to enable the dip.
+        // on
+
+        // Dip strength, i.e. how much to zoom out at the middle of the switch.
+        // 0.04 means the view scales down to 0.96 at most. Range: 0 to 1.
+        strength 0.04
+
+        // By default, the dip timing follows the workspace switch animation.
+        // Uncomment one of the lines below to give the dip its own timing:
+        // a two-phase animation (shrink, then expand back).
+        // duration-ms 300
+        // curve ease-out-quad
+        // spring damping-ratio=0.6 stiffness=400 epsilon=0.0001
+    }
+
     // Struts shrink the area occupied by windows, similarly to layer-shell panels.
     // You can think of them as a kind of outer gaps. They are set in logical pixels.
     // Left and right struts will cause the next window to the side to always be visible.

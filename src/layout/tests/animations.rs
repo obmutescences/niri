@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 
+use approx::assert_abs_diff_eq;
 use insta::assert_snapshot;
 use niri_config::animations::{Curve, EasingParams, Kind};
 
@@ -39,6 +40,83 @@ fn make_options() -> Options {
     options.animations.window_movement.0.kind = LINEAR;
 
     options
+}
+
+#[test]
+fn workspace_dip_independent_duration_is_honored() {
+    let mut options = Options {
+        layout: niri_config::Layout {
+            gaps: 0.,
+            workspace_dip: niri_config::WorkspaceDip {
+                enabled: true,
+                strength: 0.5,
+                anim: Some(niri_config::Animation {
+                    off: false,
+                    kind: Kind::Easing(EasingParams {
+                        duration_ms: 1000,
+                        curve: Curve::Linear,
+                    }),
+                }),
+            },
+            ..Default::default()
+        },
+        ..Options::default()
+    };
+    // Keep the switch itself running for the whole test.
+    options.animations.workspace_switch.0.kind = Kind::Easing(EasingParams {
+        duration_ms: 5000,
+        curve: Curve::Linear,
+    });
+
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToWorkspaceDown(false),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    let zoom_at = |layout: &Layout<TestWindow>| match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => monitors[0].overview_zoom(),
+        MonitorSet::NoOutputs { .. } => unreachable!(),
+    };
+
+    // Switch to the other workspace; both switch and dip start at t=0.
+    layout.switch_workspace_down();
+
+    {
+        let mon = match &layout.monitor_set {
+            MonitorSet::Normal { monitors, .. } => &monitors[0],
+            MonitorSet::NoOutputs { .. } => unreachable!(),
+        };
+        assert!(
+            mon.workspace_switch.is_some(),
+            "switch must be animating"
+        );
+    }
+
+    // t=0: no dip yet.
+    assert_abs_diff_eq!(zoom_at(&layout), 1., epsilon = 1e-6);
+
+    // Total dip duration 1000 ms = 500 ms shrink + 500 ms expand (linear).
+    // At t=250 ms shrink progress = 0.5 -> depth 0.5 -> zoom 0.75.
+    advance_animations(&mut layout, 250);
+    assert_abs_diff_eq!(zoom_at(&layout), 0.75, epsilon = 2e-2);
+
+    // Advance to exactly the shrink end; the state machine flips to Expanding here.
+    advance_animations(&mut layout, 750);
+
+    // At t=1125 ms expand progress = 0.25 -> depth 0.75 -> zoom 0.625.
+    advance_animations(&mut layout, 125);
+    assert_abs_diff_eq!(zoom_at(&layout), 0.625, epsilon = 2e-2);
+}
+
+fn advance_animations(layout: &mut Layout<TestWindow>, msec: u64) {
+    let now = layout.clock.now_unadjusted() + Duration::from_millis(msec);
+    layout.clock.set_unadjusted(now);
+    layout.advance_animations();
 }
 
 fn set_up_two_in_column() -> Layout<TestWindow> {

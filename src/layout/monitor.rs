@@ -79,6 +79,8 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_render_loc: Option<InsertHintRenderLoc>,
     /// Whether the overview is open.
     pub(super) overview_open: bool,
+    /// Ongoing independent workspace dip animation, see `workspace-dip` config.
+    workspace_dip: Option<WorkspaceDipAnim>,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
     /// Clock for driving animations.
@@ -95,6 +97,21 @@ pub struct Monitor<W: LayoutElement> {
 pub enum WorkspaceSwitch {
     Animation(Animation),
     Gesture(WorkspaceSwitchGesture),
+}
+
+/// Independent workspace dip animation state (two-phase: shrink then expand).
+#[derive(Debug)]
+struct WorkspaceDipAnim {
+    phase: DipPhase,
+    anim: Animation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DipPhase {
+    /// Zooming from 1 down to `1 - strength`.
+    Shrinking,
+    /// Zooming back from the current depth to 1.
+    Expanding,
 }
 
 #[derive(Debug)]
@@ -341,6 +358,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             insert_hint_render_loc: None,
             overview_open: false,
+            workspace_dip: None,
             overview_progress: None,
             workspace_switch: None,
             clock,
@@ -487,6 +505,7 @@ impl<W: LayoutElement> Monitor<W> {
                     0.,
                     config,
                 )));
+                self.start_workspace_dip();
             }
         }
     }
@@ -1065,6 +1084,8 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
+        self.advance_workspace_dip();
+
         for ws in &mut self.workspaces {
             ws.advance_animations();
         }
@@ -1074,6 +1095,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
+            || self.workspace_dip.is_some()
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1373,7 +1395,138 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn overview_zoom(&self) -> f64 {
         let progress = self.overview_progress.as_ref().map(|p| p.value());
-        compute_overview_zoom(&self.options, progress)
+        let zoom = compute_overview_zoom(&self.options, progress);
+        self.with_workspace_switch_dip(zoom)
+    }
+
+    /// Scales the zoom down while a workspace switch animation is running.
+    ///
+    /// The dip starts and ends at 1, reaching the minimum zoom in the middle of the switch.
+    fn with_workspace_switch_dip(&self, zoom: f64) -> f64 {
+        let dip = &self.options.layout.workspace_dip;
+        if !dip.enabled || dip.strength <= 0. {
+            return zoom;
+        }
+
+        // Don't fight the overview zoom; it has its own animation.
+        if self.overview_progress.is_some() {
+            return zoom;
+        }
+
+        let depth = if dip.anim.is_some() {
+            // Independent timing: driven by our own two-phase animation.
+            match &self.workspace_dip {
+                Some(state) => state.anim.clamped_value(),
+                None => return zoom,
+            }
+        } else {
+            // Follow the workspace switch animation progress.
+            let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch else {
+                return zoom;
+            };
+
+            let from = anim.from();
+            let to = anim.to();
+            if from == to {
+                return zoom;
+            }
+
+            let progress = ((anim.value() - from) / (to - from)).clamp(0., 1.);
+            f64::sin(std::f64::consts::PI * progress)
+        };
+
+        zoom * (1. - dip.strength * depth.clamp(0., 1.))
+    }
+
+    /// Returns `(shrink, expand)` animation configs for the independent dip mode.
+    ///
+    /// For easing animations, the configured duration is split between the two phases.
+    fn workspace_dip_anim_configs(&self) -> Option<(niri_config::Animation, niri_config::Animation)> {
+        let anim = self.options.layout.workspace_dip.anim?;
+        use niri_config::animations::Kind as ConfigKind;
+        let configs = match anim.kind {
+            ConfigKind::Easing(p) => {
+                let half = p.duration_ms.div_ceil(2).max(1);
+                (
+                    niri_config::Animation {
+                        off: false,
+                        kind: ConfigKind::Easing(niri_config::animations::EasingParams {
+                            duration_ms: half,
+                            curve: p.curve,
+                        }),
+                    },
+                    niri_config::Animation {
+                        off: false,
+                        kind: ConfigKind::Easing(niri_config::animations::EasingParams {
+                            duration_ms: p.duration_ms.saturating_sub(half).max(1),
+                            curve: p.curve,
+                        }),
+                    },
+                )
+            }
+            ConfigKind::Spring(p) => (
+                niri_config::Animation {
+                    off: false,
+                    kind: ConfigKind::Spring(p),
+                },
+                niri_config::Animation {
+                    off: false,
+                    kind: ConfigKind::Spring(p),
+                },
+            ),
+        };
+        Some(configs)
+    }
+
+    /// Starts (or restarts mid-flight) the shrink phase of the dip.
+    ///
+    /// Called whenever a new workspace switch animation starts.
+    fn start_workspace_dip(&mut self) {
+        if self.options.layout.workspace_dip.anim.is_none() {
+            return;
+        }
+
+        let current = self
+            .workspace_dip
+            .as_ref()
+            .map_or(0., |state| state.anim.clamped_value());
+
+        if let Some((shrink, _)) = self.workspace_dip_anim_configs() {
+            self.workspace_dip = Some(WorkspaceDipAnim {
+                phase: DipPhase::Shrinking,
+                anim: Animation::new(self.clock.clone(), current, 1., 0., shrink),
+            });
+        }
+    }
+
+    /// Advances the dip state machine: transitions shrink -> expand and cleans up when done.
+    ///
+    /// The dip always runs to completion even if the workspace switch finishes first, so the
+    /// configured duration is exact.
+    fn advance_workspace_dip(&mut self) {
+        let is_done = self
+            .workspace_dip
+            .as_ref()
+            .is_some_and(|state| state.anim.is_done());
+        if !is_done {
+            return;
+        }
+
+        let phase = self.workspace_dip.as_ref().unwrap().phase;
+        match phase {
+            DipPhase::Shrinking => {
+                if let Some((_, expand)) = self.workspace_dip_anim_configs() {
+                    let state = self.workspace_dip.as_mut().unwrap();
+                    state.phase = DipPhase::Expanding;
+                    state.anim = Animation::new(self.clock.clone(), 1., 0., 0., expand);
+                } else {
+                    self.workspace_dip = None;
+                }
+            }
+            DipPhase::Expanding => {
+                self.workspace_dip = None;
+            }
+        }
     }
 
     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
@@ -2083,6 +2236,7 @@ impl<W: LayoutElement> Monitor<W> {
             velocity,
             self.options.animations.workspace_switch.0,
         )));
+        self.start_workspace_dip();
 
         true
     }
