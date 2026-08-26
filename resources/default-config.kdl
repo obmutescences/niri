@@ -272,6 +272,15 @@ layout {
 
             // Disable scale flash for floating windows.
             disable-on-floating true
+
+            // While the flash runs, pulse (brighten) the focus ring of the newly
+            // focused window. 0 disables the pulse; 0.2 is subtle, 0.6 is dramatic.
+            // glow 0.45
+
+            // By default the flash anchors to the output edge nearest the window, so
+            // focus changes read as motion coming from that side. Uncomment to
+            // restore a plain center zoom.
+            // no-directional
         }
     }
 
@@ -293,6 +302,11 @@ layout {
         // curve ease-out-quad
         // spring damping-ratio=0.6 stiffness=400 epsilon=0.0001
     }
+
+    // Parallax for workspace switches: how much of the switch motion the workspace
+    // backgrounds follow. 1.0 keeps backgrounds glued to the windows (upstream
+    // behavior); lower values make backgrounds lag behind, adding depth. Range: 0-1.
+    // workspace-switch-parallax 0.55
 
     // Struts shrink the area occupied by windows, similarly to layer-shell panels.
     // You can think of them as a kind of outer gaps. They are set in logical pixels.
@@ -384,6 +398,28 @@ window-picker {
 
     animation-ms-open 180
     animation-ms-close 180
+
+    // Stagger between consecutive previews flying in (milliseconds). 0 makes all
+    // previews move as one. On close the order is reversed (last in, first out).
+    // stagger-ms 28
+
+    // Easing/spring override for both open and close motion. Without this block the
+    // durations above with an ease-out-cubic curve are used.
+    // duration-ms 220 scales the whole motion; a spring replaces easing entirely and
+    // damping-ratio < 1 adds overshoot bounce.
+    // animation {
+    //     duration-ms 220
+    //     curve ease-out-cubic            // linear | ease-out-quad | ease-out-expo
+    //     spring damping-ratio=0.65 stiffness=300 epsilon=0.0001
+    // }
+
+    // Highlight ring drawn behind the previews matching your typed letter filter,
+    // breathing slowly while the filter is active. width is the soft pad size in
+    // logical pixels; set width 0 to disable.
+    // selection {
+    //     color "#73daca88"
+    //     width 26
+    // }
 }
 
 // UI sound effects, played through PipeWire (pw-play).
@@ -401,6 +437,25 @@ window-picker {
 // Window rules let you adjust behavior for individual windows.
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Window-Rules
+
+// Liquid glass example: refraction on the blurred background behind a window.
+// interior-warp bends the WHOLE surface like a lens (not just the edge band);
+// positive values magnify the center, negative pinch it. 0 disables. Try 0.1-0.3;
+// large values smear content near the corners.
+// window-rule {
+//     match app-id="^org.wezfurlong.wezterm$"
+//     background-effect {
+//         blur true
+//         saturation 1.15
+//         liquid-glass {
+//             refraction-strength 20
+//             power-factor 1.5
+//             bevel-width 2.5
+//             fringing 0.6
+//             interior-warp 0.18
+//         }
+//     }
+// }
 
 // Work around WezTerm's initial configure bug
 // by setting an empty default-column-width.
