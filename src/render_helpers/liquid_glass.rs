@@ -13,6 +13,8 @@ pub struct LiquidGlassOptions {
     pub glow_edge1: f64,
     pub bevel_width: f64,
     pub fringing: f64,
+    /// Whole-surface lens warp (0 disables). Positive values magnify the center.
+    pub interior_warp: f64,
 }
 
 impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
@@ -31,6 +33,7 @@ impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
             glow_edge1: config.glow_edge1,
             bevel_width: config.bevel_width,
             fringing: config.fringing,
+            interior_warp: config.interior_warp,
         }
     }
 }

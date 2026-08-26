@@ -81,6 +81,8 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) overview_open: bool,
     /// Ongoing independent workspace dip animation, see `workspace-dip` config.
     workspace_dip: Option<WorkspaceDipAnim>,
+    /// Rubber-band nudge when trying to switch past the first/last workspace.
+    bounce: Option<WorkspaceBounce>,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
     /// Clock for driving animations.
@@ -104,6 +106,14 @@ pub enum WorkspaceSwitch {
 struct WorkspaceDipAnim {
     phase: DipPhase,
     anim: Animation,
+}
+
+/// Out-and-back rubber-band offset for the view, in logical pixels.
+#[derive(Debug)]
+struct WorkspaceBounce {
+    anim: Animation,
+    /// +1 nudges the view down (attempted switch down at the last workspace), -1 up.
+    dir: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +369,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_render_loc: None,
             overview_open: false,
             workspace_dip: None,
+            bounce: None,
             overview_progress: None,
             workspace_switch: None,
             clock,
@@ -509,6 +520,47 @@ impl<W: LayoutElement> Monitor<W> {
                 )));
                 self.start_workspace_dip();
             }
+        }
+    }
+
+    /// Start a rubber-band nudge in `dir` (+1 down / -1 up). Used when a workspace switch is
+    /// attempted past the first/last workspace: the view moves a little and springs back.
+    fn start_workspace_bounce(&mut self, dir: f64) {
+        let anim = Animation::ease(
+            self.clock.clone(),
+            0.,
+            1.,
+            0.,
+            280,
+            crate::animation::Curve::EaseOutCubic,
+        );
+        self.bounce = Some(WorkspaceBounce { anim, dir });
+    }
+
+    /// Y offset applied to workspace backgrounds during a switch so they lag behind the
+    /// windows (`layout.workspace-switch-parallax` < 1), adding parallax depth.
+    pub fn background_parallax_offset_y(&self, zoom: f64) -> f64 {
+        let factor = self.options.layout.workspace_switch_parallax;
+        if factor >= 1. || self.overview_progress.is_some() {
+            return 0.;
+        }
+        if !matches!(self.workspace_switch, Some(WorkspaceSwitch::Animation(_))) {
+            return 0.;
+        }
+        let height_with_gap = self.workspace_size_with_gap(zoom).h;
+        (self.active_workspace_idx as f64 - self.workspace_render_idx()) * height_with_gap
+            * (1. - factor)
+    }
+
+    /// Current rubber-band Y offset for the view (0 outside of a bounce).
+    fn workspace_bounce_offset_y(&self) -> f64 {
+        const AMPLITUDE: f64 = 26.;
+        match &self.bounce {
+            Some(bounce) => {
+                let t = bounce.anim.clamped_value();
+                bounce.dir * AMPLITUDE * (t * std::f64::consts::PI).sin()
+            }
+            None => 0.,
         }
     }
 
@@ -1000,7 +1052,14 @@ impl<W: LayoutElement> Monitor<W> {
                 let new = current.ceil() - 1.;
                 new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
             }
-            _ => self.active_workspace_idx.saturating_sub(1),
+            _ => {
+                let new_idx = self.active_workspace_idx.saturating_sub(1);
+                if new_idx == self.active_workspace_idx {
+                    self.start_workspace_bounce(-1.);
+                    return;
+                }
+                new_idx
+            }
         };
 
         self.activate_workspace(new_idx);
@@ -1014,7 +1073,14 @@ impl<W: LayoutElement> Monitor<W> {
                 let new = current.floor() + 1.;
                 new.clamp(0., (self.workspaces.len() - 1) as f64) as usize
             }
-            _ => min(self.active_workspace_idx + 1, self.workspaces.len() - 1),
+            _ => {
+                let new_idx = min(self.active_workspace_idx + 1, self.workspaces.len() - 1);
+                if new_idx == self.active_workspace_idx {
+                    self.start_workspace_bounce(1.);
+                    return;
+                }
+                new_idx
+            }
         };
 
         self.activate_workspace(new_idx);
@@ -1052,6 +1118,12 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn advance_animations(&mut self) {
+        if let Some(bounce) = &self.bounce {
+            if bounce.anim.is_done() {
+                self.bounce = None;
+            }
+        }
+
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) => {
                 if anim.is_done() {
@@ -1098,6 +1170,7 @@ impl<W: LayoutElement> Monitor<W> {
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
             || self.workspace_dip.is_some()
+            || self.bounce.is_some()
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1640,7 +1713,8 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap
+            + self.workspace_bounce_offset_y();
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.

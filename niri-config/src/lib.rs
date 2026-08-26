@@ -1454,6 +1454,8 @@ mod tests {
                         flash_scale: 0.9,
                         disable_on_solo: false,
                         disable_on_floating: false,
+                        glow: 0.0,
+                        directional: true,
                     },
                 },
                 workspace_dip: WorkspaceDip {
@@ -1519,6 +1521,7 @@ mod tests {
                     b: 0.25,
                     a: 1.0,
                 },
+                workspace_switch_parallax: 1.0,
             },
             prefer_no_csd: true,
             cursor: Cursor {
@@ -2482,6 +2485,19 @@ mod tests {
                 },
                 animation_ms_open: 180,
                 animation_ms_close: 180,
+                stagger_ms: 28,
+                animation: WindowPickerAnim {
+                    kind: None,
+                },
+                selection: WindowPickerSelection {
+                    color: Color {
+                        r: 0.4509804,
+                        g: 0.85490197,
+                        b: 0.7921569,
+                        a: 0.43137255,
+                    },
+                    width: 26.0,
+                },
             },
             sounds: Sounds {
                 on: true,

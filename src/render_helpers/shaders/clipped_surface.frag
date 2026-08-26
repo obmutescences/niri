@@ -41,6 +41,9 @@ uniform float lg_glow_edge1;
 uniform float lg_edge_lighting;
 uniform float lg_fringing;
 uniform float lg_bevel_width;
+// Interior lens warp: bends the whole surface like a lens, not just the edge band.
+// 0 disables; positive values pull samples toward the center (magnify).
+uniform float lg_interior_warp;
 
 float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 vec4 postprocess(vec4 color);
@@ -328,6 +331,17 @@ void main() {
     float lg_enabled = step(0.0001, lg_refraction_strength);
 
     if (inside_geo * lg_enabled > 0.0) {
+        // Interior lens: bend sampling toward the center, strongest at the corners, so it
+        // blends continuously into the edge bevel. Capped to avoid smearing past the texture.
+        vec2 uv_tex = v_coords;
+        if (abs(lg_interior_warp) > 0.0001) {
+            vec2 d = v_coords - 0.5;
+            float r2 = dot(d, d);
+            vec2 off = d * (lg_interior_warp * min(r2, 0.35));
+            off = clamp(off, vec2(-0.12), vec2(0.12));
+            uv_tex -= off;
+        }
+
         float norm_strength = clamp(lg_refraction_strength * 0.05, 0.0, 1.0);
         vec4 remapped_radius = vec4(
             corner_radius.w,
@@ -337,7 +351,7 @@ void main() {
         );
 
         color = glass_effect(
-            v_coords,
+            uv_tex,
             coords_geo.xy,
             color,
             geo_size,

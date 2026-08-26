@@ -107,6 +107,8 @@ pub struct Tile<W: LayoutElement> {
 
     /// State machine for focus animations.
     focus_animation_state: FocusAnimationState,
+    /// Whether the focus-ring glow pulse is currently applied (needs restoring).
+    focus_glow_active: bool,
 
     /// Offset during the initial interactive move rubberband.
     pub(super) interactive_move_offset: Point<f64, Logical>,
@@ -246,6 +248,7 @@ impl<W: LayoutElement> Tile<W> {
             scale_animation: None,
             was_focused: false,
             focus_animation_state: FocusAnimationState::Idle,
+            focus_glow_active: false,
             interactive_move_offset: Point::from((0., 0.)),
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
@@ -811,6 +814,7 @@ impl<W: LayoutElement> Tile<W> {
             self.scale_animation = None;
             self.focus_animation_state = FocusAnimationState::Idle;
             self.was_focused = is_focused;
+            self.apply_focus_glow();
             return;
         }
 
@@ -851,6 +855,7 @@ impl<W: LayoutElement> Tile<W> {
             };
             self.animate_scale(1.0, target_scale, shrink_config);
             self.was_focused = true;
+            self.apply_focus_glow();
             return;
         }
         self.was_focused = is_focused;
@@ -860,6 +865,62 @@ impl<W: LayoutElement> Tile<W> {
             FocusAnimationState::Flashing { .. } => self.advance_focus_animation(),
             FocusAnimationState::Idle => (),
         }
+
+        self.apply_focus_glow();
+    }
+
+    /// Modulates the focus ring color with a pulse while a focus flash is running (`glow` > 0),
+    /// and restores the base config once the flash is over.
+    fn apply_focus_glow(&mut self) {
+        let glow = self.options.layout.focus_animation.scale.glow;
+        let flashing = matches!(
+            self.focus_animation_state,
+            FocusAnimationState::Flashing { .. }
+        );
+
+        let pulse = if glow > 0. && flashing {
+            let target =
+                self.options.layout.focus_animation.scale.flash_scale.clamp(0.0, 2.0) as f64;
+            let span = (1. - target).abs();
+            if let Some(scale_anim) = &self.scale_animation {
+                let v = scale_anim.anim.value();
+                let phase = if span > 1e-3 {
+                    ((1. - v) / span).clamp(0., 1.)
+                } else {
+                    0.
+                };
+                (phase * std::f64::consts::PI).sin() * glow
+            } else {
+                0.
+            }
+        } else {
+            0.
+        };
+
+        if pulse == 0. && !self.focus_glow_active {
+            return;
+        }
+
+        // Recompute the base ring config the same way `update_config` does.
+        let rules = self.window.rules();
+        let mut config = self
+            .options
+            .layout
+            .focus_ring
+            .merged_with(&rules.focus_ring);
+
+        if pulse > 0. {
+            let boost = 1. + pulse as f32;
+            config.active_color *= boost;
+            if let Some(g) = &mut config.active_gradient {
+                g.from *= boost;
+                g.to *= boost;
+            }
+        }
+
+        self.focus_ring.update_config(config);
+        self.focus_ring.update_shaders();
+        self.focus_glow_active = pulse > 0.;
     }
 
     pub fn ensure_alpha_animates_to_1(&mut self) {
@@ -1616,11 +1677,41 @@ impl<W: LayoutElement> Tile<W> {
             match scale_anim.offscreen.render(ctx.renderer, scale, &elements) {
                 Ok((elem, _sync, data)) => {
                     let progress = scale_anim.anim.value();
-                    let center = self.animated_tile_size().to_point().downscale(2.);
+                    let size = self.animated_tile_size();
+
+                    // Anchor for the scale. By default the anchor is biased toward the output
+                    // edge nearest this tile, so a focus flash reads as motion coming from that
+                    // side instead of a plain center zoom.
+                    let center = size.to_point().downscale(2.);
+                    let anchor = if self.options.layout.focus_animation.scale.directional {
+                        let view_w = self.view_size.w.max(1.);
+                        let view_h = self.view_size.h.max(1.);
+                        // Tile location within the workspace view is `location`; its center is
+                        // what we compare against the view's thirds.
+                        let cx = location.x + size.w / 2.;
+                        let cy = location.y + size.h / 2.;
+                        let ax = if cx < view_w * 0.38 {
+                            0.
+                        } else if cx > view_w * 0.62 {
+                            size.w
+                        } else {
+                            center.x
+                        };
+                        let ay = if cy < view_h * 0.38 {
+                            0.
+                        } else if cy > view_h * 0.62 {
+                            size.h
+                        } else {
+                            center.y
+                        };
+                        Point::from((ax, ay))
+                    } else {
+                        center
+                    };
 
                     let elem = RescaleRenderElement::from_element(
                         elem,
-                        center.to_physical_precise_round(scale),
+                        anchor.to_physical_precise_round(scale),
                         progress,
                     );
 

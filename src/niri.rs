@@ -4469,8 +4469,19 @@ impl Niri {
             push_normal_from_layer!(Layer::Background);
 
             // We don't expect more than one workspace when render_above_top_layer().
-            if let Some((ws, _geo)) = mon.workspaces_with_render_geo().next() {
-                push(ws.render_background().into());
+            if let Some((ws, geo)) = mon.workspaces_with_render_geo().next() {
+                let parallax_y = mon.background_parallax_offset_y(zoom);
+                if parallax_y != 0. {
+                    let shifted =
+                        Rectangle::new(geo.loc + Point::from((0., parallax_y)), geo.size);
+                    if let Some(elem) =
+                        scale_relocate_crop(ws.render_background(), output_scale, zoom, shifted)
+                    {
+                        push(elem.into());
+                    }
+                } else {
+                    push(ws.render_background().into());
+                }
             }
         } else {
             push_popups_from_layer!(Layer::Top);
@@ -4515,7 +4526,15 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                process!(geo)(ws.render_background());
+                // Parallax: render this workspace's background at a lagging offset so it
+                // trails behind the windows during a switch.
+                let parallax_y = mon.background_parallax_offset_y(zoom);
+                let bg_geo = if parallax_y != 0. {
+                    Rectangle::new(geo.loc + Point::from((0., parallax_y)), geo.size)
+                } else {
+                    geo
+                };
+                process!(bg_geo)(ws.render_background());
             }
         }
 

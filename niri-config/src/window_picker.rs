@@ -1,5 +1,167 @@
-use crate::utils::MergeWith;
+use knuffel::errors::DecodeError;
+
+use crate::animations::{Animation, Curve, EasingParams, Kind as AnimKind, SpringParams};
+use crate::utils::{expect_only_children, parse_arg_node, MergeWith};
 use crate::{Color, FloatOrInt};
+
+/// Optional easing/spring override for the picker open/close animations.
+///
+/// ```kdl
+/// window-picker {
+///     animation {
+///         duration-ms 220
+///         curve ease-out-cubic
+///         // or: spring damping-ratio=0.6 stiffness=320 epsilon=0.0001
+///     }
+/// }
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct WindowPickerAnim {
+    /// `None`: legacy ease-out-cubic with the per-direction `animation-ms-*` durations.
+    pub kind: Option<AnimKind>,
+}
+
+impl WindowPickerAnim {
+    /// Build a concrete `Animation` config, falling back to ease-out-cubic with the given
+    /// per-direction default duration (matching the legacy fixed behavior).
+    pub fn to_animation(&self, fallback_duration_ms: u16) -> Animation {
+        let kind = self.kind.unwrap_or_else(|| {
+            AnimKind::Easing(EasingParams {
+                duration_ms: u32::from(fallback_duration_ms.max(1)),
+                curve: Curve::EaseOutCubic,
+            })
+        });
+        Animation {
+            off: false,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct WindowPickerAnimPart {
+    pub duration_ms: Option<u16>,
+    pub spring: Option<WindowPickerSpringPart>,
+    pub curve: Option<String>,
+}
+
+impl<S> knuffel::Decode<S> for WindowPickerAnimPart
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        use knuffel::traits::DecodeScalar;
+        expect_only_children(node, ctx);
+
+        let mut part = Self::default();
+
+        for child in node.children() {
+            match &**child.node_name {
+                "duration-ms" => {
+                    part.duration_ms = Some(parse_arg_node("duration-ms", child, ctx)?);
+                }
+                "curve" => {
+                    let mut iter_args = child.arguments.iter();
+                    let val = iter_args.next().ok_or_else(|| {
+                        DecodeError::missing(child, "additional argument `curve` is required")
+                    })?;
+                    part.curve = Some(DecodeScalar::decode(val, ctx)?);
+                }
+                "spring" => {
+                    let mut damping_ratio = None;
+                    let mut stiffness = None;
+                    let mut epsilon = None;
+                    for (name, val) in &child.properties {
+                        match &***name {
+                            "damping-ratio" => {
+                                damping_ratio = Some(DecodeScalar::decode(val, ctx)?);
+                            }
+                            "stiffness" => stiffness = Some(DecodeScalar::decode(val, ctx)?),
+                            "epsilon" => epsilon = Some(DecodeScalar::decode(val, ctx)?),
+                            _ => (),
+                        }
+                    }
+                    part.spring = Some(WindowPickerSpringPart {
+                        damping_ratio: damping_ratio.unwrap_or(0.6),
+                        stiffness: stiffness.unwrap_or(320),
+                        epsilon: epsilon.unwrap_or(0.0001),
+                    });
+                }
+                _ => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        child,
+                        "node",
+                        format!("unexpected node `{}`", child.node_name.escape_default()),
+                    ));
+                }
+            }
+        }
+
+        Ok(part)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowPickerSpringPart {
+    pub damping_ratio: f64,
+    pub stiffness: u32,
+    pub epsilon: f64,
+}
+
+impl WindowPickerAnimPart {
+    pub fn into_override(&self) -> WindowPickerAnim {
+        let kind = if let Some(spring) = &self.spring {
+            Some(AnimKind::Spring(SpringParams {
+                damping_ratio: spring.damping_ratio,
+                stiffness: spring.stiffness,
+                epsilon: spring.epsilon,
+            }))
+        } else if self.curve.is_some() || self.duration_ms.is_some() {
+            let curve_owned = self.curve.clone();
+            let curve = match curve_owned.as_deref() {
+                Some("linear") => Curve::Linear,
+                Some("ease-out-quad") => Curve::EaseOutQuad,
+                Some("ease-out-expo") => Curve::EaseOutExpo,
+                _ => Curve::EaseOutCubic,
+            };
+            Some(AnimKind::Easing(EasingParams {
+                duration_ms: u32::from(self.duration_ms.unwrap_or(180)),
+                curve,
+            }))
+        } else {
+            None
+        };
+        WindowPickerAnim { kind }
+    }
+}
+
+/// Highlight ring drawn behind matching previews while a letter filter is active.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowPickerSelection {
+    pub color: Color,
+    pub width: f64,
+}
+
+impl Default for WindowPickerSelection {
+    fn default() -> Self {
+        Self {
+            color: Color::from_rgba8_unpremul(115, 218, 202, 110),
+            width: 26.,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+pub struct WindowPickerSelectionPart {
+    #[knuffel(child)]
+    pub color: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub width: Option<FloatOrInt<2, 200>>,
+}
+
 
 /// Configuration for the keyboard-driven window picker.
 #[derive(Debug, Clone, PartialEq)]
@@ -12,6 +174,12 @@ pub struct WindowPicker {
     pub backdrop: WindowPickerBackdrop,
     pub animation_ms_open: u16,
     pub animation_ms_close: u16,
+    /// Stagger between consecutive preview entry animations (0 disables).
+    pub stagger_ms: u16,
+    /// Easing/spring override for both open and close animations.
+    pub animation: WindowPickerAnim,
+    /// Highlight ring for previews matching the active letter filter.
+    pub selection: WindowPickerSelection,
 }
 
 impl Default for WindowPicker {
@@ -25,6 +193,9 @@ impl Default for WindowPicker {
             backdrop: WindowPickerBackdrop::default(),
             animation_ms_open: 180,
             animation_ms_close: 180,
+            stagger_ms: 28,
+            animation: WindowPickerAnim::default(),
+            selection: WindowPickerSelection::default(),
         }
     }
 }
@@ -47,6 +218,12 @@ pub struct WindowPickerPart {
     pub animation_ms_open: Option<u16>,
     #[knuffel(child, unwrap(argument))]
     pub animation_ms_close: Option<u16>,
+    #[knuffel(child, unwrap(argument))]
+    pub stagger_ms: Option<u16>,
+    #[knuffel(child)]
+    pub animation: Option<WindowPickerAnimPart>,
+    #[knuffel(child)]
+    pub selection: Option<WindowPickerSelectionPart>,
 }
 
 impl MergeWith<WindowPickerPart> for WindowPicker {
@@ -55,6 +232,18 @@ impl MergeWith<WindowPickerPart> for WindowPicker {
         merge!((self, part), label, backdrop);
         merge_clone!((self, part), animation_ms_open);
         merge_clone!((self, part), animation_ms_close);
+        merge_clone!((self, part), stagger_ms);
+        if let Some(anim) = &part.animation {
+            self.animation = anim.into_override();
+        }
+        if let Some(selection) = &part.selection {
+            if let Some(color) = selection.color {
+                self.selection.color = color;
+            }
+            if let Some(width) = selection.width {
+                self.selection.width = width.0;
+            }
+        }
     }
 }
 

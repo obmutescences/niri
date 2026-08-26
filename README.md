@@ -33,6 +33,7 @@ window-rule {
             refraction-power 1.8     // overall refraction intensity multiplier (>1 for stronger bend)
             bevel-width 2.5          // width multiplier of the edge band where the effect lives
             fringing 0.6             // RGB chromatic aberration at the edges
+            interior-warp 0.18       // whole-surface lens bend (0 disables, try 0.1-0.3)
             glow-weight 0.08         // specular highlight intensity
         }
     }
@@ -74,8 +75,24 @@ window-picker {
             passes 3
         }
     }
+
+    // Motion: stagger between previews, optional spring/easing override,
+    // and the highlight ring shown behind previews matching your filter.
+    stagger-ms 28
+    selection {
+        color "#73daca88"
+        width 26
+    }
+
+    animation {
+        duration-ms 220
+        // curve ease-out-expo
+        // spring damping-ratio=0.65 stiffness=300 epsilon=0.0001
+    }
 }
 ```
+
+Selecting a window now flies its preview back toward that window while everything else fades out.
 
 ### Workspace Switch Zoom Dip
 
@@ -96,6 +113,18 @@ layout {
 }
 ```
 
+Two extra workspace-switch refinements are available under `layout`:
+
+```kdl
+layout {
+    // Backgrounds lag behind windows during a switch (1 = off / upstream behavior).
+    workspace-switch-parallax 0.55
+
+    // Trying to switch past the first/last workspace gives a rubber-band nudge
+    // instead of doing nothing (built-in, no configuration needed).
+}
+```
+
 ### Focus Animation
 
 A brief scale "flash" when a window gains keyboard focus, making focus changes easy to track. Configured per-layout, with easing or spring timing:
@@ -111,6 +140,11 @@ layout {
             flash-scale 0.95    // <1 shrinks first, >1 expands first
             disable-on-solo true
             disable-on-floating true
+
+            // Anchor the flash to the output edge nearest the window so it reads as motion
+            // coming from that side, and pulse the focus ring while flashing.
+            no-directional false
+            glow 0.45           // 0 disables the ring pulse
         }
     }
 }

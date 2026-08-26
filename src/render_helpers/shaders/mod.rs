@@ -112,6 +112,7 @@ impl Shaders {
                     UniformName::new("lg_edge_lighting", UniformType::_1f),
                     UniformName::new("lg_fringing", UniformType::_1f),
                     UniformName::new("lg_bevel_width", UniformType::_1f),
+                    UniformName::new("lg_interior_warp", UniformType::_1f),
                 ],
             )
             .map_err(|err| {
@@ -149,6 +150,7 @@ impl Shaders {
                     UniformName::new("lg_edge_lighting", UniformType::_1f),
                     UniformName::new("lg_fringing", UniformType::_1f),
                     UniformName::new("lg_bevel_width", UniformType::_1f),
+                    UniformName::new("lg_interior_warp", UniformType::_1f),
                 ],
             )
             .map_err(|err| {

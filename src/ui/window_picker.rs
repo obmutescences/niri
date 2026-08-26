@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::mem;
 use std::rc::Rc;
-use std::time::Duration;
 
 use anyhow::ensure;
 use niri_config::{Color, Config, CornerRadius, WindowPickerLabel};
@@ -20,7 +19,8 @@ use smithay::input::keyboard::Keysym;
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 
-use crate::animation::Clock;
+use crate::animation::{Animation, Clock};
+use crate::layout::focus_ring::{FocusRing, FocusRingRenderElement};
 use crate::layout::{LayoutElement as _, LayoutElementRenderElement};
 use crate::niri::Niri;
 use crate::niri_render_elements;
@@ -55,6 +55,7 @@ niri_render_elements! {
         Label = PrimaryGpuTextureRenderElement,
         SolidColor = SolidColorRenderElement,
         FramebufferEffect = FramebufferEffectElement,
+        Ring = FocusRingRenderElement,
     }
 }
 
@@ -70,7 +71,6 @@ pub struct WindowPickerSession {
     output: Output,
     prefix: Option<char>,
     clock: Clock,
-    opened_at: Duration,
 }
 
 impl WindowPickerSession {
@@ -99,102 +99,50 @@ impl WindowPickerSession {
             .map(|((id, _), label)| PickerEntry { id, label })
             .collect();
         let clock = niri.clock.clone();
-        let opened_at = clock.now();
 
         Some(Self {
             entries,
             output,
             prefix: None,
             clock,
-            opened_at,
         })
-    }
-
-    fn linear_progress(&self, duration_ms: u16) -> f64 {
-        if duration_ms == 0 {
-            return 1.;
-        }
-
-        let elapsed = self.clock.now().saturating_sub(self.opened_at);
-        (elapsed.as_secs_f64() / (f64::from(duration_ms) / 1000.)).clamp(0., 1.)
-    }
-
-    fn progress(&self, duration_ms: u16) -> f64 {
-        ease_out_cubic(self.linear_progress(duration_ms))
-    }
-
-    fn animation_is_ongoing(&self, duration_ms: u16) -> bool {
-        duration_ms != 0
-            && self.clock.now().saturating_sub(self.opened_at)
-                < Duration::from_millis(u64::from(duration_ms))
     }
 }
 
 #[derive(Debug)]
 enum WindowPickerState {
     Closed,
-    Open(WindowPickerSession),
+    Open {
+        session: WindowPickerSession,
+        anim: Animation,
+    },
     Closing {
         session: WindowPickerSession,
-        closed_at: Duration,
-        from_progress: f64,
+        anim: Animation,
     },
 }
 
 impl WindowPickerState {
     fn session(&self) -> Option<&WindowPickerSession> {
         match self {
-            Self::Open(session) | Self::Closing { session, .. } => Some(session),
+            Self::Open { session, .. } | Self::Closing { session, .. } => Some(session),
             Self::Closed => None,
         }
     }
 
     fn session_mut(&mut self) -> Option<&mut WindowPickerSession> {
         match self {
-            Self::Open(session) | Self::Closing { session, .. } => Some(session),
+            Self::Open { session, .. } | Self::Closing { session, .. } => Some(session),
             Self::Closed => None,
         }
     }
 
-    fn progress(&self, open_duration_ms: u16, close_duration_ms: u16) -> f64 {
+    fn anim(&self) -> Option<&Animation> {
         match self {
-            Self::Open(session) => session.progress(open_duration_ms),
-            Self::Closing {
-                session,
-                closed_at,
-                from_progress,
-            } => closing_progress(
-                session.clock.now(),
-                *closed_at,
-                *from_progress,
-                close_duration_ms,
-            ),
-            Self::Closed => 0.,
+            Self::Open { anim, .. } | Self::Closing { anim, .. } => Some(anim),
+            Self::Closed => None,
         }
     }
-
-    fn animation_is_ongoing(&self, open_duration_ms: u16, close_duration_ms: u16) -> bool {
-        match self {
-            Self::Open(session) => session.animation_is_ongoing(open_duration_ms),
-            Self::Closing { .. } => close_duration_ms != 0,
-            Self::Closed => false,
-        }
-    }
-}
-
-fn closing_progress(
-    now: Duration,
-    closed_at: Duration,
-    from_progress: f64,
-    close_duration_ms: u16,
-) -> f64 {
-    if close_duration_ms == 0 {
-        return 0.;
-    }
-
-    let elapsed = now.saturating_sub(closed_at);
-    let elapsed = elapsed.as_secs_f64() / (f64::from(close_duration_ms) / 1000.);
-    ease_out_cubic((from_progress - elapsed).clamp(0., 1.))
 }
 
 fn ease_out_cubic(progress: f64) -> f64 {
@@ -262,6 +210,9 @@ pub struct WindowPickerUi {
     label_cache: RefCell<LabelCache>,
     backdrop_buffers: RefCell<HashMap<Output, BackdropBuffers>>,
     framebuffer_effect: RefCell<FramebufferEffect>,
+    /// Window being flown back to its real position during the closing animation.
+    fly_back: Option<MappedId>,
+    selection_ring: RefCell<FocusRing>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,11 +229,36 @@ impl WindowPickerUi {
             label_cache: RefCell::new(LabelCache::default()),
             backdrop_buffers: RefCell::new(HashMap::new()),
             framebuffer_effect: RefCell::new(FramebufferEffect::new()),
+            fly_back: None,
+            selection_ring: RefCell::new(FocusRing::new(niri_config::FocusRing {
+                off: false,
+                width: 26.,
+                active_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
+                inactive_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
+                urgent_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
+                active_gradient: None,
+                inactive_gradient: None,
+                urgent_gradient: None,
+            })),
         }
     }
 
+    fn progress(&self) -> f64 {
+        self.state
+            .anim()
+            .map_or(0., Animation::clamped_value)
+    }
+
+    fn raw_progress(&self) -> f64 {
+        self.state.anim().map_or(0., Animation::value).clamp(0., 1.)
+    }
+
+    fn is_closing(&self) -> bool {
+        matches!(self.state, WindowPickerState::Closing { .. })
+    }
+
     pub fn is_open(&self) -> bool {
-        matches!(self.state, WindowPickerState::Open(_))
+        matches!(&self.state, WindowPickerState::Open { .. })
     }
 
     pub fn is_active(&self) -> bool {
@@ -294,33 +270,51 @@ impl WindowPickerUi {
     }
 
     pub fn open(&mut self, session: WindowPickerSession) {
+        let config = self.config.borrow().window_picker.clone();
+        let anim_cfg = config.animation.to_animation(config.animation_ms_open);
+        let anim = Animation::new(session.clock.clone(), 0., 1., 0., anim_cfg);
+
         self.label_cache.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
-        self.state = WindowPickerState::Open(session);
+        self.fly_back = None;
+        self.state = WindowPickerState::Open { session, anim };
     }
 
     pub fn close(&mut self) -> bool {
+        // Already closing (e.g. a fly-back selection started it); keep the running animation.
+        if matches!(self.state, WindowPickerState::Closing { .. }) {
+            return true;
+        }
+
         let state = mem::replace(&mut self.state, WindowPickerState::Closed);
-        let WindowPickerState::Open(mut session) = state else {
-            let was_active = !matches!(state, WindowPickerState::Closed);
+        let WindowPickerState::Open { mut session, anim } = state else {
             self.state = state;
-            return was_active;
+            return false;
         };
 
         let config = self.config.borrow().window_picker.clone();
         session.prefix = None;
-        let from_progress = session.linear_progress(config.animation_ms_open);
-        if config.animation_ms_close == 0 || from_progress == 0. {
+
+        if config.animation_ms_close == 0 && config.animation.kind.is_none() {
             self.finish_close();
-        } else {
-            let closed_at = session.clock.now();
-            self.state = WindowPickerState::Closing {
-                session,
-                closed_at,
-                from_progress,
-            };
-            self.framebuffer_effect.get_mut().damage();
+            return true;
         }
+
+        let mut close_cfg = config.animation.to_animation(config.animation_ms_close);
+        // Give the fly-back preview enough time to travel.
+        if self.fly_back.is_some() {
+            if let niri_config::animations::Kind::Easing(p) = &mut close_cfg.kind {
+                p.duration_ms = p.duration_ms.max(280);
+            }
+        }
+
+        let current = anim.clamped_value();
+        let close_anim = Animation::new(session.clock.clone(), current, 0., 0., close_cfg);
+        self.state = WindowPickerState::Closing {
+            session,
+            anim: close_anim,
+        };
+        self.framebuffer_effect.get_mut().damage();
         true
     }
 
@@ -336,15 +330,15 @@ impl WindowPickerUi {
     fn finish_close(&mut self) {
         self.backdrop_buffers.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
+        self.fly_back = None;
     }
 
     pub fn advance_animations(&mut self) -> bool {
-        let config = self.config.borrow().window_picker.clone();
         let finished = matches!(self.state, WindowPickerState::Closing { .. })
             && self
                 .state
-                .progress(config.animation_ms_open, config.animation_ms_close)
-                <= 0.;
+                .anim()
+                .is_some_and(Animation::is_clamped_done);
         if finished {
             self.close_immediately();
         }
@@ -385,55 +379,58 @@ impl WindowPickerUi {
             return WindowPickerKeyResult::Handled;
         }
 
-        let WindowPickerState::Open(session) = &mut self.state else {
-            return WindowPickerKeyResult::Handled;
-        };
-
-        if raw == Keysym::BackSpace {
-            session.prefix = None;
-            return WindowPickerKeyResult::Handled;
-        }
-
-        let Some(letter) = letter_from_keysym(raw) else {
-            return WindowPickerKeyResult::Handled;
-        };
-
         // Labels stay stable while the picker is open, including when windows close. Determine
         // whether this session uses one or two letters from the labels rather than the live count.
-        if session
-            .entries
-            .first()
-            .is_some_and(|entry| entry.label.len() == 1)
-        {
-            let selected = session
-                .entries
-                .iter()
-                .find(|entry| entry.label.starts_with(letter))
-                .map(|entry| entry.id);
-            if let Some(id) = selected {
-                return WindowPickerKeyResult::Selected(id);
-            }
-            return WindowPickerKeyResult::Handled;
-        }
+        let selected = {
+            let WindowPickerState::Open { session, .. } = &mut self.state else {
+                return WindowPickerKeyResult::Handled;
+            };
 
-        if let Some(prefix) = session.prefix {
-            let selected = session
-                .entries
-                .iter()
-                .find(|entry| {
-                    let mut chars = entry.label.chars();
-                    chars.next() == Some(prefix) && chars.next() == Some(letter)
-                })
-                .map(|entry| entry.id);
-            if let Some(id) = selected {
-                return WindowPickerKeyResult::Selected(id);
+            if raw == Keysym::BackSpace {
+                session.prefix = None;
+                return WindowPickerKeyResult::Handled;
             }
-        } else if session
-            .entries
-            .iter()
-            .any(|entry| entry.label.starts_with(letter))
-        {
-            session.prefix = Some(letter);
+
+            let Some(letter) = letter_from_keysym(raw) else {
+                return WindowPickerKeyResult::Handled;
+            };
+
+            if session
+                .entries
+                .first()
+                .is_some_and(|entry| entry.label.len() == 1)
+            {
+                session
+                    .entries
+                    .iter()
+                    .find(|entry| entry.label.starts_with(letter))
+                    .map(|entry| entry.id)
+            } else if let Some(prefix) = session.prefix {
+                session
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        let mut chars = entry.label.chars();
+                        chars.next() == Some(prefix) && chars.next() == Some(letter)
+                    })
+                    .map(|entry| entry.id)
+            } else {
+                if session
+                    .entries
+                    .iter()
+                    .any(|entry| entry.label.starts_with(letter))
+                {
+                    session.prefix = Some(letter);
+                }
+                None
+            }
+        };
+
+        // Fly the selected preview back to its window while the picker closes.
+        if let Some(id) = selected {
+            self.fly_back = Some(id);
+            self.close();
+            return WindowPickerKeyResult::Selected(id);
         }
 
         WindowPickerKeyResult::Handled
@@ -445,7 +442,7 @@ impl WindowPickerUi {
         output: &Output,
         pos_within_output: Point<f64, Logical>,
     ) -> Option<MappedId> {
-        let WindowPickerState::Open(session) = &self.state else {
+        let WindowPickerState::Open { session, .. } = &self.state else {
             return None;
         };
         if output != &session.output {
@@ -453,7 +450,7 @@ impl WindowPickerUi {
         }
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = session.progress(config.animation_ms_open);
+        let progress = self.progress();
         let output_size = output_size(output);
         let scale = output.current_scale().fractional_scale();
         let mut windows = picker_windows(niri, session, &config.label);
@@ -479,9 +476,16 @@ impl WindowPickerUi {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        let config = self.config.borrow().window_picker.clone();
-        self.state
-            .animation_is_ongoing(config.animation_ms_open, config.animation_ms_close)
+        if self
+            .state
+            .anim()
+            .is_some_and(|anim| !anim.is_clamped_done())
+        {
+            return true;
+        }
+
+        // Keep redrawing while a letter filter is active so the selection ring can breathe.
+        matches!(&self.state, WindowPickerState::Open { session, .. } if session.prefix.is_some())
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -496,9 +500,9 @@ impl WindowPickerUi {
         };
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = self
-            .state
-            .progress(config.animation_ms_open, config.animation_ms_close);
+        let progress = self.progress();
+        let raw_progress = self.raw_progress();
+        let closing = self.is_closing();
         let alpha = progress as f32;
         let size = output_size(output);
         let scale = output.current_scale().fractional_scale();
@@ -519,18 +523,92 @@ impl WindowPickerUi {
             }
 
             let inputs = grid_inputs(&windows);
+            let count = windows.len();
+
+            // Normalized per-entry stagger: later entries start later; on close the order is
+            // reversed so the last entry to fly in is the first to fly out.
+            let frac = if count > 1 && config.stagger_ms > 0 {
+                let total = config.animation_ms_open.max(1) as f64 / 1000.;
+                ((f64::from(config.stagger_ms) / 1000.) / total).min(0.5 / (count - 1) as f64)
+            } else {
+                0.
+            };
+
+            // Breathe the selection ring while a letter filter is active.
+            let ring_pulse = session
+                .prefix
+                .map(|_| 0.72 + 0.28 * (session.clock.now().as_secs_f64() * 4.0).sin())
+                .unwrap_or(0.);
 
             if let Some(layout) = compute_grid(size, &inputs, &config) {
-                for (window, placement) in windows.iter().zip(layout.placements) {
-                    let entry_alpha = if session
+                let mut ring = self.selection_ring.borrow_mut();
+                for (i, (window, placement)) in windows.iter().zip(layout.placements).enumerate() {
+                    let ord = if closing { count - 1 - i } else { i };
+                    let span = 1. - frac * (count.saturating_sub(1)) as f64;
+                    let local_t =
+                        ((raw_progress - frac * ord as f64) / span.max(f64::EPSILON)).clamp(0., 1.);
+                    let eased = if closing {
+                        local_t
+                    } else {
+                        ease_out_cubic(local_t)
+                    };
+
+                    let mut preview = animate_rect(placement.preview, size, eased);
+                    let mut entry_alpha = if session
                         .prefix
                         .is_some_and(|prefix| !window.entry.label.starts_with(prefix))
                     {
                         PREFIX_DIM_ALPHA * alpha
                     } else {
-                        alpha
+                        alpha * eased.clamp(0., 1.) as f32
                     };
-                    let preview = animate_rect(placement.preview, size, progress);
+
+                    let is_fly_back = closing && self.fly_back == Some(window.entry.id);
+
+                    if is_fly_back {
+                        // The chosen preview grows toward the viewer while everything fades.
+                        let grow = 1. + 0.55 * (1. - progress);
+                        let center = preview.loc + preview.size.to_point().upscale(0.5);
+                        let grown = preview.size.upscale(grow);
+                        preview = Rectangle::new(center - grown.to_point().upscale(0.5), grown);
+                        entry_alpha = ((progress - 0.12) / 0.3).clamp(0., 1.) as f32;
+                    } else if closing {
+                        entry_alpha *= ((progress * 1.6).clamp(0., 1.)) as f32;
+                    }
+
+                    // Selection highlight ring behind matching previews.
+                    if !closing
+                        && session
+                            .prefix
+                            .is_some_and(|prefix| window.entry.label.starts_with(prefix))
+                        && config.selection.width > 0.
+                    {
+                        let color = config.selection.color * ring_pulse as f32;
+                        ring.update_config(niri_config::FocusRing {
+                            off: false,
+                            width: config.selection.width,
+                            active_color: color,
+                            inactive_color: color,
+                            urgent_color: color,
+                            active_gradient: None,
+                            inactive_gradient: None,
+                            urgent_gradient: None,
+                        });
+                        ring.update_render_elements(
+                            preview.size,
+                            true,
+                            false,
+                            false,
+                            Rectangle::from_size(size),
+                            CornerRadius::from(config.selection.width.min(16.) as f32),
+                            scale,
+                            entry_alpha,
+                        );
+                        ring.render(ctx.renderer, preview.loc, &mut |elem| {
+                            push(WindowPickerUiRenderElement::Ring(elem));
+                        });
+                    }
+
                     let final_center =
                         placement.preview.loc + placement.preview.size.to_point().upscale(0.5);
                     let animated_center = preview.loc + preview.size.to_point().upscale(0.5);
@@ -616,7 +694,8 @@ impl WindowPickerUi {
             };
             let blur = backdrop.blur.on.then_some(BlurOptions {
                 passes: backdrop.blur.passes,
-                offset: backdrop.blur.offset,
+                // Focus-pull: the blur radius ramps in with the open animation.
+                offset: (backdrop.blur.offset * progress).round(),
             });
             let saturation = 1. + (backdrop.saturation - 1.) * progress;
             let effect = self.framebuffer_effect.borrow().render(
@@ -1151,24 +1230,6 @@ mod tests {
             assert!(area.contains_rect(placement.preview));
             assert!(area.contains_rect(placement.label));
         }
-    }
-
-    #[test]
-    fn closing_progress_uses_close_duration() {
-        let closed_at = Duration::ZERO;
-        // Half of a 200 ms close from full open progress.
-        let half = closing_progress(Duration::from_millis(100), closed_at, 1.0, 200);
-        let expected = 1. - (1. - 0.5_f64).powi(3);
-        assert!((half - expected).abs() < 1e-9);
-
-        // Zero close duration closes instantly.
-        assert_eq!(closing_progress(Duration::ZERO, closed_at, 1.0, 0), 0.);
-
-        // Progress clamps at zero once the close duration elapses.
-        assert_eq!(
-            closing_progress(Duration::from_millis(1000), closed_at, 1.0, 200),
-            0.
-        );
     }
 
     #[test]

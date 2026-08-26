@@ -157,6 +157,7 @@ fn extend_liquid_glass_uniforms(
         Uniform::new("lg_edge_lighting", 1.0f32),
         Uniform::new("lg_fringing", lg.fringing as f32),
         Uniform::new("lg_bevel_width", lg.bevel_width as f32),
+        Uniform::new("lg_interior_warp", lg.interior_warp as f32),
     ]);
 }
 
