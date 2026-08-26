@@ -1454,8 +1454,6 @@ mod tests {
                         flash_scale: 0.9,
                         disable_on_solo: false,
                         disable_on_floating: false,
-                        glow: 0.0,
-                        directional: true,
                     },
                 },
                 workspace_dip: WorkspaceDip {
@@ -1521,7 +1519,6 @@ mod tests {
                     b: 0.25,
                     a: 1.0,
                 },
-                workspace_switch_parallax: 1.0,
             },
             prefer_no_csd: true,
             cursor: Cursor {

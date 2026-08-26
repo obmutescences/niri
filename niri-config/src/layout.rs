@@ -31,10 +31,6 @@ pub struct Layout {
     pub gaps: f64,
     pub struts: Struts,
     pub background_color: Color,
-    /// Fraction of the workspace-switch motion applied to workspace backgrounds (0..1).
-    /// 1.0 = backgrounds move together with the windows (upstream behavior); lower values
-    /// make the background lag behind, adding a parallax sense of depth.
-    pub workspace_switch_parallax: f64,
 }
 
 impl Default for Layout {
@@ -66,7 +62,6 @@ impl Default for Layout {
                 PresetSize::Proportion(2. / 3.),
             ],
             background_color: DEFAULT_BACKGROUND_COLOR,
-            workspace_switch_parallax: 1.0,
         }
     }
 }
@@ -86,9 +81,6 @@ impl MergeWith<LayoutPart> for Layout {
             gaps,
         );
 
-        if let Some(x) = part.workspace_switch_parallax {
-            self.workspace_switch_parallax = x.0.clamp(0., 1.);
-        }
 
         if let Some(focus_scale) = &part.focus_scale {
             self.focus_animation.scale.merge_with(focus_scale);
@@ -166,8 +158,6 @@ pub struct LayoutPart {
     pub struts: Option<Struts>,
     #[knuffel(child)]
     pub background_color: Option<Color>,
-    #[knuffel(child, unwrap(argument))]
-    pub workspace_switch_parallax: Option<FloatOrInt<0, 1>>,
 }
 
 #[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]

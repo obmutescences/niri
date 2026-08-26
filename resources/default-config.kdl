@@ -272,15 +272,6 @@ layout {
 
             // Disable scale flash for floating windows.
             disable-on-floating true
-
-            // While the flash runs, pulse (brighten) the focus ring of the newly
-            // focused window. 0 disables the pulse; 0.2 is subtle, 0.6 is dramatic.
-            // glow 0.45
-
-            // By default the flash anchors to the output edge nearest the window, so
-            // focus changes read as motion coming from that side. Uncomment to
-            // restore a plain center zoom.
-            // no-directional
         }
     }
 
@@ -302,11 +293,6 @@ layout {
         // curve ease-out-quad
         // spring damping-ratio=0.6 stiffness=400 epsilon=0.0001
     }
-
-    // Parallax for workspace switches: how much of the switch motion the workspace
-    // backgrounds follow. 1.0 keeps backgrounds glued to the windows (upstream
-    // behavior); lower values make backgrounds lag behind, adding depth. Range: 0-1.
-    // workspace-switch-parallax 0.55
 
     // Struts shrink the area occupied by windows, similarly to layer-shell panels.
     // You can think of them as a kind of outer gaps. They are set in logical pixels.
@@ -417,7 +403,7 @@ window-picker {
     // breathing slowly while the filter is active. width is the soft pad size in
     // logical pixels; set width 0 to disable.
     // selection {
-    //     color "#73daca88"
+    //     active-color "#73daca88"
     //     width 26
     // }
 }

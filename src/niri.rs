@@ -1049,6 +1049,19 @@ impl State {
         let pointer = &self.niri.seat.get_pointer().unwrap();
         let location = pointer.current_location();
 
+        // Track which picker preview the cursor is over, for the hover highlight ring.
+        if self.niri.window_picker_ui.is_active() {
+            let hover = self
+                .niri
+                .output_under(location)
+                .and_then(|(output, pos)| {
+                    self.niri.window_picker_ui.window_under(&self.niri, output, pos)
+                });
+            if self.niri.window_picker_ui.set_hover(hover) {
+                self.niri.queue_redraw_all();
+            }
+        }
+
         if !self.niri.exit_confirm_dialog.is_open()
             && !self.niri.is_locked()
             && !self.niri.screenshot_ui.is_open()
@@ -4469,19 +4482,8 @@ impl Niri {
             push_normal_from_layer!(Layer::Background);
 
             // We don't expect more than one workspace when render_above_top_layer().
-            if let Some((ws, geo)) = mon.workspaces_with_render_geo().next() {
-                let parallax_y = mon.background_parallax_offset_y(zoom);
-                if parallax_y != 0. {
-                    let shifted =
-                        Rectangle::new(geo.loc + Point::from((0., parallax_y)), geo.size);
-                    if let Some(elem) =
-                        scale_relocate_crop(ws.render_background(), output_scale, zoom, shifted)
-                    {
-                        push(elem.into());
-                    }
-                } else {
-                    push(ws.render_background().into());
-                }
+            if let Some((ws, _geo)) = mon.workspaces_with_render_geo().next() {
+                push(ws.render_background().into());
             }
         } else {
             push_popups_from_layer!(Layer::Top);
@@ -4502,6 +4504,7 @@ impl Niri {
                     }
                 }};
             }
+
 
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
@@ -4526,15 +4529,7 @@ impl Niri {
                 push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
 
-                // Parallax: render this workspace's background at a lagging offset so it
-                // trails behind the windows during a switch.
-                let parallax_y = mon.background_parallax_offset_y(zoom);
-                let bg_geo = if parallax_y != 0. {
-                    Rectangle::new(geo.loc + Point::from((0., parallax_y)), geo.size)
-                } else {
-                    geo
-                };
-                process!(bg_geo)(ws.render_background());
+                process!(geo)(ws.render_background());
             }
         }
 
@@ -6610,6 +6605,7 @@ fn scale_relocate_crop<E: Element>(
     let elem = RelocateRenderElement::from_element(elem, ws_geo.loc, Relocate::Relative);
     CropRenderElement::from_element(elem, output_scale, ws_geo)
 }
+
 
 niri_render_elements! {
     PointerRenderElements<R> => {

@@ -157,7 +157,7 @@ impl Default for WindowPickerSelection {
 #[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
 pub struct WindowPickerSelectionPart {
     #[knuffel(child)]
-    pub color: Option<Color>,
+    pub active_color: Option<Color>,
     #[knuffel(child, unwrap(argument))]
     pub width: Option<FloatOrInt<2, 200>>,
 }
@@ -237,7 +237,7 @@ impl MergeWith<WindowPickerPart> for WindowPicker {
             self.animation = anim.into_override();
         }
         if let Some(selection) = &part.selection {
-            if let Some(color) = selection.color {
+            if let Some(color) = selection.active_color {
                 self.selection.color = color;
             }
             if let Some(width) = selection.width {

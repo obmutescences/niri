@@ -80,7 +80,7 @@ window-picker {
     // and the highlight ring shown behind previews matching your filter.
     stagger-ms 28
     selection {
-        color "#73daca88"
+        active-color "#73daca88"
         width 26
     }
 
@@ -113,17 +113,8 @@ layout {
 }
 ```
 
-Two extra workspace-switch refinements are available under `layout`:
-
-```kdl
-layout {
-    // Backgrounds lag behind windows during a switch (1 = off / upstream behavior).
-    workspace-switch-parallax 0.55
-
-    // Trying to switch past the first/last workspace gives a rubber-band nudge
-    // instead of doing nothing (built-in, no configuration needed).
-}
-```
+Trying to switch past the first/last workspace gives a rubber-band nudge
+instead of doing nothing (built-in, no configuration needed).
 
 ### Focus Animation
 
@@ -140,11 +131,6 @@ layout {
             flash-scale 0.95    // <1 shrinks first, >1 expands first
             disable-on-solo true
             disable-on-floating true
-
-            // Anchor the flash to the output edge nearest the window so it reads as motion
-            // coming from that side, and pulse the focus ring while flashing.
-            no-directional false
-            glow 0.45           // 0 disables the ring pulse
         }
     }
 }

@@ -537,20 +537,6 @@ impl<W: LayoutElement> Monitor<W> {
         self.bounce = Some(WorkspaceBounce { anim, dir });
     }
 
-    /// Y offset applied to workspace backgrounds during a switch so they lag behind the
-    /// windows (`layout.workspace-switch-parallax` < 1), adding parallax depth.
-    pub fn background_parallax_offset_y(&self, zoom: f64) -> f64 {
-        let factor = self.options.layout.workspace_switch_parallax;
-        if factor >= 1. || self.overview_progress.is_some() {
-            return 0.;
-        }
-        if !matches!(self.workspace_switch, Some(WorkspaceSwitch::Animation(_))) {
-            return 0.;
-        }
-        let height_with_gap = self.workspace_size_with_gap(zoom).h;
-        (self.active_workspace_idx as f64 - self.workspace_render_idx()) * height_with_gap
-            * (1. - factor)
-    }
 
     /// Current rubber-band Y offset for the view (0 outside of a bounce).
     fn workspace_bounce_offset_y(&self) -> f64 {

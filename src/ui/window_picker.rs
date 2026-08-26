@@ -70,6 +70,8 @@ pub struct WindowPickerSession {
     entries: Vec<PickerEntry>,
     output: Output,
     prefix: Option<char>,
+    /// The currently focused window when the picker opened, if any.
+    focused_id: Option<MappedId>,
     clock: Clock,
 }
 
@@ -78,10 +80,14 @@ impl WindowPickerSession {
         let output = niri.layout.active_output()?.clone();
         let mut windows = Vec::new();
         let mut seen = HashSet::new();
+        let mut focused_id = None;
 
         for (_, mapped) in niri.layout.windows() {
             let size = mapped.size();
             if size.w > 0 && size.h > 0 && seen.insert(mapped.id()) {
+                if mapped.is_focused() {
+                    focused_id = Some(mapped.id());
+                }
                 windows.push((mapped.id(), mapped.get_focus_timestamp()));
             }
         }
@@ -90,6 +96,11 @@ impl WindowPickerSession {
         windows.truncate(MAX_WINDOWS);
         if windows.is_empty() {
             return None;
+        }
+
+        // Keep the focus marker only if the focused window survived truncation.
+        if !windows.iter().any(|(id, _)| Some(id) == focused_id.as_ref()) {
+            focused_id = None;
         }
 
         let labels = make_labels(windows.len());
@@ -104,6 +115,7 @@ impl WindowPickerSession {
             entries,
             output,
             prefix: None,
+            focused_id,
             clock,
         })
     }
@@ -212,6 +224,8 @@ pub struct WindowPickerUi {
     framebuffer_effect: RefCell<FramebufferEffect>,
     /// Window being flown back to its real position during the closing animation.
     fly_back: Option<MappedId>,
+    /// Preview the cursor is currently over (hover highlight).
+    hover: Option<MappedId>,
     selection_ring: RefCell<FocusRing>,
 }
 
@@ -230,6 +244,7 @@ impl WindowPickerUi {
             backdrop_buffers: RefCell::new(HashMap::new()),
             framebuffer_effect: RefCell::new(FramebufferEffect::new()),
             fly_back: None,
+            hover: None,
             selection_ring: RefCell::new(FocusRing::new(niri_config::FocusRing {
                 off: false,
                 width: 26.,
@@ -277,6 +292,7 @@ impl WindowPickerUi {
         self.label_cache.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
         self.fly_back = None;
+        self.hover = None;
         self.state = WindowPickerState::Open { session, anim };
     }
 
@@ -331,6 +347,15 @@ impl WindowPickerUi {
         self.backdrop_buffers.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
         self.fly_back = None;
+    }
+
+    /// Updates the hovered preview (from pointer motion); `None` clears it.
+    ///
+    /// Returns whether the hovered entry changed, so the caller can queue a redraw.
+    pub fn set_hover(&mut self, id: Option<MappedId>) -> bool {
+        let changed = self.hover != id;
+        self.hover = id;
+        changed
     }
 
     pub fn advance_animations(&mut self) -> bool {
@@ -484,8 +509,13 @@ impl WindowPickerUi {
             return true;
         }
 
-        // Keep redrawing while a letter filter is active so the selection ring can breathe.
-        matches!(&self.state, WindowPickerState::Open { session, .. } if session.prefix.is_some())
+        // Keep redrawing while a letter filter is active or a preview is hovered so the
+        // selection ring can breathe.
+        matches!(
+            &self.state,
+            WindowPickerState::Open { session, .. }
+                if session.prefix.is_some() || self.hover.is_some()
+        )
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -534,11 +564,8 @@ impl WindowPickerUi {
                 0.
             };
 
-            // Breathe the selection ring while a letter filter is active.
-            let ring_pulse = session
-                .prefix
-                .map(|_| 0.72 + 0.28 * (session.clock.now().as_secs_f64() * 4.0).sin())
-                .unwrap_or(0.);
+            // Breathe the selection ring.
+            let ring_pulse = 0.72 + 0.28 * (session.clock.now().as_secs_f64() * 4.0).sin();
 
             if let Some(layout) = compute_grid(size, &inputs, &config) {
                 let mut ring = self.selection_ring.borrow_mut();
@@ -576,12 +603,14 @@ impl WindowPickerUi {
                         entry_alpha *= ((progress * 1.6).clamp(0., 1.)) as f32;
                     }
 
-                    // Selection highlight ring behind matching previews.
-                    if !closing
-                        && session
+                    // Selection highlight ring behind the hovered preview, previews matching
+                    // the active letter filter, and the currently focused window.
+                    let ring_match = self.hover == Some(window.entry.id)
+                        || session
                             .prefix
                             .is_some_and(|prefix| window.entry.label.starts_with(prefix))
-                        && config.selection.width > 0.
+                        || session.focused_id == Some(window.entry.id);
+                    if !closing && ring_match && config.selection.width > 0.
                     {
                         let color = config.selection.color * ring_pulse as f32;
                         ring.update_config(niri_config::FocusRing {
@@ -632,7 +661,7 @@ impl WindowPickerUi {
             }
         }
 
-        self.render_backdrop(output, size, progress, &config, push);
+        self.render_backdrop(output, size, progress, closing, &config, push);
     }
 
     fn render_backdrop<R: NiriRenderer>(
@@ -640,12 +669,22 @@ impl WindowPickerUi {
         output: &Output,
         size: Size<f64, Logical>,
         progress: f64,
+        closing: bool,
         config: &niri_config::WindowPicker,
         push: &mut dyn FnMut(WindowPickerUiRenderElement<R>),
     ) {
         let backdrop = config.backdrop;
         let mut buffers = self.backdrop_buffers.borrow_mut();
         let buffers = buffers.entry(output.clone()).or_default();
+
+        // On close, drop the backdrop noticeably faster than the previews and cut it
+        // entirely at the very end, so it never lingers after the motion is done.
+        let progress = if closing {
+            let fast = (progress * 1.8).clamp(0., 1.);
+            if progress <= 0.02 { 0. } else { fast }
+        } else {
+            progress
+        };
 
         let dim_alpha = ((1. - backdrop.brightness) * progress).clamp(0., 1.) as f32;
         buffers

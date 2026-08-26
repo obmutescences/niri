@@ -1545,11 +1545,6 @@ pub struct FocusScale {
     pub flash_scale: f32,
     pub disable_on_solo: bool,
     pub disable_on_floating: bool,
-    /// Focus-ring glow pulse amplitude during the flash (0 disables).
-    pub glow: f64,
-    /// Anchor the flash scale to the output edge nearest the window, so the motion reads as
-    /// directional instead of a uniform center zoom.
-    pub directional: bool,
 }
 
 impl Default for FocusScale {
@@ -1559,8 +1554,6 @@ impl Default for FocusScale {
             flash_scale: 0.9,
             disable_on_solo: false,
             disable_on_floating: false,
-            glow: 0.,
-            directional: true,
         }
     }
 }
@@ -1581,14 +1574,6 @@ impl MergeWith<FocusScalePart> for FocusScale {
         }
         if let Some(disable_on_floating) = part.disable_on_floating {
             self.disable_on_floating = disable_on_floating.0;
-        }
-        if let Some(glow) = part.glow {
-            self.glow = glow.0.clamp(0.0, 2.0);
-        }
-        if part.no_directional.is_some() {
-            self.directional = false;
-        } else if part.directional.is_some() {
-            self.directional = true;
         }
     }
 }
