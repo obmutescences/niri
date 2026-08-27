@@ -294,6 +294,33 @@ layout {
         // spring damping-ratio=0.6 stiffness=400 epsilon=0.0001
     }
 
+    // 3D depth effect for workspace switches ("N6").
+    // During a switch, workspaces farther away from the center of the screen are scaled down
+    // (and optionally squashed vertically), so the scene reads as having depth — as if the
+    // workspaces recede into the distance. Does nothing while the overview is open.
+    workspace-switch-3d {
+        // Uncomment this line to enable the effect.
+        // on
+
+        // How much far workspaces shrink: 1.0 = no shrink, 0.0 = shrink to nothing.
+        // Range: 0 to 1.
+        depth 0.6
+
+        // Extra vertical squash for far workspaces (a cheap 2D approximation of a rotateX
+        // tilt, making them look like they lean back): 1.0 = no squash, 0.0 = fully flattened.
+        // Range: 0 to 1.
+        squash 0.8
+
+        // Distance (in screen heights) over which the effect ramps from none to full.
+        // 1.0 means a workspace one screen away already gets the full effect.
+        // Range: 0 to 10000.
+        radius 1.0
+
+        // Exponent of the ramp curve: 1.0 = linear, higher values concentrate the effect
+        // closer to the edges of the screen. Range: 0 to 10000.
+        curve-power 1.5
+    }
+
     // Struts shrink the area occupied by windows, similarly to layer-shell panels.
     // You can think of them as a kind of outer gaps. They are set in logical pixels.
     // Left and right struts will cause the next window to the side to always be visible.

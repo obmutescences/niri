@@ -8,7 +8,7 @@ use smithay::backend::renderer::element::utils::{
     CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::output::Output;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
@@ -222,7 +222,7 @@ niri_render_elements! {
 }
 
 pub type MonitorRenderElement<R> =
-    RelocateRenderElement<RescaleRenderElement<MonitorInnerRenderElement<R>>>;
+    RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<MonitorInnerRenderElement<R>>>>;
 
 impl WorkspaceSwitch {
     pub fn current_idx(&self) -> f64 {
@@ -1499,6 +1499,47 @@ impl<W: LayoutElement> Monitor<W> {
         zoom * (1. - dip.strength * depth.clamp(0., 1.))
     }
 
+    /// Per-workspace 3D depth scale for the `workspace-switch-3d` effect ("N6").
+    ///
+    /// Returns `None` when the effect is disabled or not applicable (e.g. while the overview is
+    /// open or animating). When `Some`, the returned scale recedes workspaces away from the
+    /// center of the screen: workspaces farther from the center are smaller (and optionally
+    /// squashed vertically, a cheap 2D approximation of a rotateX tilt). The scale is meant to
+    /// be applied about the workspace's own center.
+    pub(crate) fn workspace_3d_scale(&self, geo: Rectangle<f64, Logical>) -> Option<Scale<f64>> {
+        let cfg = self.options.layout.workspace_switch_3d;
+        if !cfg.enabled {
+            return None;
+        }
+
+        // Only during workspace switches; not while the overview is open or animating.
+        if self.overview_progress.is_some() || self.workspace_switch.is_none() {
+            return None;
+        }
+
+        if cfg.depth >= 1. && cfg.squash >= 1. {
+            return None;
+        }
+
+        let out_h = self.view_size.h;
+        if out_h <= 0. {
+            return None;
+        }
+
+        // How far the workspace center is from the center of the output, in screen heights.
+        let center_y = geo.loc.y + geo.size.h / 2.;
+        let distance = (center_y - out_h / 2.).abs() / out_h;
+
+        // Ramp from no effect (0) to the full effect over `radius` screen heights.
+        let t = (distance / cfg.radius.max(f64::EPSILON)).clamp(0., 1.);
+        let eased = t.powf(cfg.curve_power.max(0.));
+
+        let depth = 1. - (1. - cfg.depth) * eased;
+        let squash = 1. - (1. - cfg.squash) * eased;
+
+        Some(Scale::from((depth, depth * squash)))
+    }
+
     /// Returns `(shrink, expand)` animation configs for the independent dip mode.
     ///
     /// For easing animations, the configured duration is split between the two phases.
@@ -1887,6 +1928,9 @@ impl<W: LayoutElement> Monitor<W> {
                 let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
                 let elem =
                     RelocateRenderElement::from_element(elem, Point::default(), Relocate::Relative);
+                // Identity depth wrapper to match the MonitorRenderElement type.
+                let elem =
+                    RescaleRenderElement::from_element(elem, Point::default(), Scale::from(1.));
                 push(elem);
             });
     }
@@ -1909,16 +1953,22 @@ impl<W: LayoutElement> Monitor<W> {
             .insert_hint_render_loc
             .filter(|_| !self.options.layout.insert_hint.off);
 
-        let scale_relocate = move |geo: Rectangle<f64, Logical>, elem| {
+        let scale_relocate = move |geo: Rectangle<f64, Logical>, depth: Scale<f64>, elem| {
             let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
-            RelocateRenderElement::from_element(
+            let elem = RelocateRenderElement::from_element(
                 elem,
                 // The offset we get from workspaces_with_render_geo() is already
                 // rounded to physical pixels, but it's in the logical coordinate
                 // space, so we need to convert it to physical.
                 geo.loc.to_physical_precise_round(scale),
                 Relocate::Relative,
-            )
+            );
+
+            // N6: recede the whole workspace about its own center so that it shrinks
+            // (and optionally squashes vertically) as it moves away from the screen center.
+            let center =
+                (geo.loc + geo.size.to_point().downscale(2.)).to_physical_precise_round(scale);
+            RescaleRenderElement::from_element(elem, center, depth)
         };
 
         // Draw in passes for correct Z ordering during window movement between workspaces:
@@ -1968,7 +2018,10 @@ impl<W: LayoutElement> Monitor<W> {
                             let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
                             if let Some(elem) = elem {
                                 let elem = MonitorInnerRenderElement::from(elem);
-                                push(scale_relocate(geo, elem));
+                                let depth = self
+                                    .workspace_3d_scale(geo)
+                                    .unwrap_or(Scale::from(1.));
+                                push(scale_relocate(geo, depth, elem));
                             }
                         }
                     }};
@@ -2053,6 +2106,10 @@ impl<W: LayoutElement> Monitor<W> {
                     geo.loc.to_physical_precise_round(scale),
                     Relocate::Relative,
                 );
+                // Identity depth wrapper to match the MonitorRenderElement type.
+                let center =
+                    (geo.loc + geo.size.to_point().downscale(2.)).to_physical_precise_round(scale);
+                let elem = RescaleRenderElement::from_element(elem, center, Scale::from(1.));
                 push(elem);
             });
         }

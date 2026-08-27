@@ -3,12 +3,12 @@ use niri_ipc::{ColumnDisplay, SizeChange};
 
 use crate::appearance::{
     Blur, Border, FocusAnimation, FocusRing, InsertHint, Shadow, TabIndicator, WorkspaceDip,
-    DEFAULT_BACKGROUND_COLOR,
+    WorkspaceSwitch3D, DEFAULT_BACKGROUND_COLOR,
 };
 use crate::utils::{expect_only_children, Flag, MergeWith};
 use crate::{
     BlurPart, BorderRule, Color, FloatOrInt, FocusAnimationPart, FocusScalePart, InsertHintPart,
-    ShadowRule, TabIndicatorPart, WorkspaceDipPart,
+    ShadowRule, TabIndicatorPart, WorkspaceDipPart, WorkspaceSwitch3DPart,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,7 @@ pub struct Layout {
     pub insert_hint: InsertHint,
     pub focus_animation: FocusAnimation,
     pub workspace_dip: WorkspaceDip,
+    pub workspace_switch_3d: WorkspaceSwitch3D,
     pub preset_column_widths: Vec<PresetSize>,
     pub default_column_width: Option<PresetSize>,
     pub preset_window_heights: Vec<PresetSize>,
@@ -44,6 +45,7 @@ impl Default for Layout {
             insert_hint: InsertHint::default(),
             focus_animation: FocusAnimation::default(),
             workspace_dip: WorkspaceDip::default(),
+            workspace_switch_3d: WorkspaceSwitch3D::default(),
             preset_column_widths: vec![
                 PresetSize::Proportion(1. / 3.),
                 PresetSize::Proportion(0.5),
@@ -94,6 +96,10 @@ impl MergeWith<LayoutPart> for Layout {
             self.workspace_dip.merge_with(workspace_dip);
         }
 
+        if let Some(workspace_switch_3d) = &part.workspace_switch_3d {
+            self.workspace_switch_3d.merge_with(workspace_switch_3d);
+        }
+
         merge_clone!(
             (self, part),
             preset_column_widths,
@@ -138,6 +144,8 @@ pub struct LayoutPart {
     pub focus_animation: Option<FocusAnimationPart>,
     #[knuffel(child)]
     pub workspace_dip: Option<WorkspaceDipPart>,
+    #[knuffel(child)]
+    pub workspace_switch_3d: Option<WorkspaceSwitch3DPart>,
     #[knuffel(child, unwrap(children))]
     pub preset_column_widths: Option<Vec<PresetSize>>,
     #[knuffel(child)]

@@ -4496,9 +4496,9 @@ impl Niri {
 
             // Macro instead of closure to avoid borrowing push().
             macro_rules! process {
-                ($geo:expr) => {{
+                ($geo:expr, $depth:expr) => {{
                     &mut |elem| {
-                        if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, $geo) {
+                        if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, $geo, $depth) {
                             push(elem.into());
                         }
                     }
@@ -4509,8 +4509,9 @@ impl Niri {
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                let depth = mon.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
+                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, depth));
+                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo, depth));
             }
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
@@ -4526,10 +4527,11 @@ impl Niri {
                 // damage tracker.
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                let depth = mon.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
+                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, depth));
+                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, depth));
 
-                process!(geo)(ws.render_background());
+                process!(geo, depth)(ws.render_background());
             }
         }
 
@@ -6599,10 +6601,24 @@ fn scale_relocate_crop<E: Element>(
     output_scale: Scale<f64>,
     zoom: f64,
     ws_geo: Rectangle<f64, Logical>,
-) -> Option<CropRenderElement<RelocateRenderElement<RescaleRenderElement<E>>>> {
+    depth: Scale<f64>,
+) -> Option<
+    CropRenderElement<
+        RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<E>>>,
+    >,
+> {
     let ws_geo = ws_geo.to_physical_precise_round(output_scale);
     let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
     let elem = RelocateRenderElement::from_element(elem, ws_geo.loc, Relocate::Relative);
+
+    // N6: recede the whole workspace about its own center, matching the depth transform
+    // applied to windows in `Monitor::render_workspaces`.
+    let center = Point::from((
+        ws_geo.loc.x + ws_geo.size.w / 2,
+        ws_geo.loc.y + ws_geo.size.h / 2,
+    ));
+    let elem = RescaleRenderElement::from_element(elem, center, depth);
+
     CropRenderElement::from_element(elem, output_scale, ws_geo)
 }
 
@@ -6626,12 +6642,12 @@ niri_render_elements! {
         Monitor = MonitorRenderElement<R>,
         RescaledTile = RescaleRenderElement<TileRenderElement<R>>,
         LayerSurface = LayerSurfaceRenderElement<R>,
-        RelocatedLayerSurface = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
+        RelocatedLayerSurface = CropRenderElement<RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<
             LayerSurfaceRenderElement<R>
-        >>>,
-        RelocatedColor = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
+        >>>>,
+        RelocatedColor = CropRenderElement<RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<
             SolidColorRenderElement
-        >>>,
+        >>>>,
         Pointer = PointerRenderElements<R>,
         Wayland = WaylandSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,

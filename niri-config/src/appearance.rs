@@ -1941,6 +1941,216 @@ where
     }
 }
 
+/// 3D depth effect for workspace switches.
+///
+/// During a workspace switch, workspaces that are farther away from the center of the screen
+/// are scaled down (and optionally squashed vertically) so the whole scene reads as having
+/// depth, as if the workspaces recede into the distance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkspaceSwitch3D {
+    pub enabled: bool,
+    /// Scale applied to workspaces at full "distance": 1.0 = no shrink, 0.0 = shrink to nothing.
+    pub depth: f64,
+    /// Extra vertical squash for far workspaces (a cheap 2D approximation of a rotateX tilt):
+    /// 1.0 = no squash, 0.0 = fully flattened.
+    pub squash: f64,
+    /// Distance (in screen heights) over which the effect ramps from none to full.
+    pub radius: f64,
+    /// Exponent of the ramp curve: 1.0 = linear, higher = effect concentrated near the edges.
+    pub curve_power: f64,
+}
+
+impl Default for WorkspaceSwitch3D {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            depth: 0.6,
+            squash: 0.8,
+            radius: 1.0,
+            curve_power: 1.5,
+        }
+    }
+}
+
+impl MergeWith<WorkspaceSwitch3DPart> for WorkspaceSwitch3D {
+    fn merge_with(&mut self, part: &WorkspaceSwitch3DPart) {
+        if part.off {
+            self.enabled = false;
+        } else if part.on {
+            self.enabled = true;
+        }
+
+        if let Some(depth) = part.depth {
+            self.depth = depth.0.clamp(0., 1.);
+        }
+        if let Some(squash) = part.squash {
+            self.squash = squash.0.clamp(0., 1.);
+        }
+        if let Some(radius) = part.radius {
+            self.radius = radius.0.max(0.);
+        }
+        if let Some(curve_power) = part.curve_power {
+            self.curve_power = curve_power.0.max(0.);
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct WorkspaceSwitch3DPart {
+    pub off: bool,
+    pub on: bool,
+    pub depth: Option<FloatOrInt<0, 1>>,
+    pub squash: Option<FloatOrInt<0, 1>>,
+    pub radius: Option<FloatOrInt<0, 10000>>,
+    pub curve_power: Option<FloatOrInt<0, 10000>>,
+}
+
+impl<S> knuffel::Decode<S> for WorkspaceSwitch3DPart
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        expect_only_children(node, ctx);
+
+        let mut off = false;
+        let mut on = false;
+        let mut depth = None;
+        let mut squash = None;
+        let mut radius = None;
+        let mut curve_power = None;
+
+        for child in node.children() {
+            match &**child.node_name {
+                "off" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    off = true;
+                }
+                "on" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    on = true;
+                }
+                "depth" => {
+                    depth = Some(parse_arg_node("depth", child, ctx)?);
+                }
+                "squash" => {
+                    squash = Some(parse_arg_node("squash", child, ctx)?);
+                }
+                "radius" => {
+                    radius = Some(parse_arg_node("radius", child, ctx)?);
+                }
+                "curve-power" => {
+                    curve_power = Some(parse_arg_node("curve-power", child, ctx)?);
+                }
+                name_str => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        child,
+                        "node",
+                        format!("unexpected node `{}`", name_str.escape_default()),
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            off,
+            on,
+            depth,
+            squash,
+            radius,
+            curve_power,
+        })
+    }
+}
+
+#[cfg(test)]
+mod workspace_switch_3d_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_switch_3d_default_off() {
+        let config = r#"
+            layout {
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let ws3d = parsed.layout.workspace_switch_3d;
+        assert!(!ws3d.enabled);
+        assert_eq!(ws3d.depth, 0.6);
+        assert_eq!(ws3d.squash, 0.8);
+        assert_eq!(ws3d.radius, 1.0);
+        assert_eq!(ws3d.curve_power, 1.5);
+    }
+
+    #[test]
+    fn workspace_switch_3d_parsing() {
+        let config = r#"
+            layout {
+                workspace-switch-3d {
+                    on
+                    depth 0.4
+                    squash 0.7
+                    radius 2.5
+                    curve-power 3
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let ws3d = parsed.layout.workspace_switch_3d;
+        assert!(ws3d.enabled);
+        assert_eq!(ws3d.depth, 0.4);
+        assert_eq!(ws3d.squash, 0.7);
+        assert_eq!(ws3d.radius, 2.5);
+        assert_eq!(ws3d.curve_power, 3.0);
+    }
+
+    #[test]
+    fn workspace_switch_3d_off_wins() {
+        let config = r#"
+            layout {
+                workspace-switch-3d {
+                    on
+                    off
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        assert!(!parsed.layout.workspace_switch_3d.enabled);
+    }
+
+    #[test]
+    fn workspace_switch_3d_out_of_range_rejected() {
+        let config = r#"
+            layout {
+                workspace-switch-3d {
+                    depth 5
+                }
+            }
+        "#;
+        assert!(crate::Config::parse_mem(config).is_err());
+    }
+
+    #[test]
+    fn workspace_switch_3d_wide_ranges_accepted() {
+        let config = r#"
+            layout {
+                workspace-switch-3d {
+                    on
+                    radius 5000
+                    curve-power 8000
+                }
+            }
+        "#;
+        let parsed = crate::Config::parse_mem(config).unwrap();
+        let ws3d = parsed.layout.workspace_switch_3d;
+        assert!(ws3d.enabled);
+        assert_eq!(ws3d.radius, 5000.);
+        assert_eq!(ws3d.curve_power, 8000.);
+    }
+}
+
 #[cfg(test)]
 mod workspace_dip_tests {
     use super::*;

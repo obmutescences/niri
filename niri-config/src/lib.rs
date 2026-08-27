@@ -1461,6 +1461,13 @@ mod tests {
                     strength: 0.04,
                     anim: None,
                 },
+                workspace_switch_3d: WorkspaceSwitch3D {
+                    enabled: false,
+                    depth: 0.6,
+                    squash: 0.8,
+                    radius: 1.0,
+                    curve_power: 1.5,
+                },
                 preset_column_widths: [
                     Proportion(
                         0.25,
