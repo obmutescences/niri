@@ -116,6 +116,24 @@ layout {
 Trying to switch past the first/last workspace gives a rubber-band nudge
 instead of doing nothing (built-in, no configuration needed).
 
+### Workspace Switch 3D Depth
+
+An optional 3D-style depth effect for workspace switches. While a switch animation runs, workspaces farther away from the center of the screen are scaled down — and optionally squashed vertically — about their own centers, so the scene reads as receding into the distance. Windows, layer-shell wallpapers and per-workspace backgrounds all transform together and stay perfectly aligned. Disabled by default; enable it under `layout`:
+
+```kdl
+layout {
+    workspace-switch-3d {
+        on
+        depth 0.6        // scale of far workspaces at full distance (0 = to nothing, 1 = no shrink)
+        squash 0.8       // extra vertical squash for far workspaces (1 = none; approximates a rotateX tilt)
+        radius 1.0       // distance in screen heights over which the effect ramps from none to full
+        curve-power 1.5  // ramp exponent (1 = linear, higher = effect concentrated near the screen edges)
+    }
+}
+```
+
+The effect only runs while a workspace switch is active, and is skipped while the overview is open or animating. It composes with the workspace dip and the rubber-band edge bounce.
+
 ### Focus Animation
 
 A brief scale "flash" when a window gains keyboard focus, making focus changes easy to track. Configured per-layout, with easing or spring timing:
