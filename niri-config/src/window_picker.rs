@@ -31,10 +31,7 @@ impl WindowPickerAnim {
                 curve: Curve::EaseOutCubic,
             })
         });
-        Animation {
-            off: false,
-            kind,
-        }
+        Animation { off: false, kind }
     }
 }
 
@@ -138,18 +135,23 @@ impl WindowPickerAnimPart {
     }
 }
 
-/// Highlight ring drawn behind matching previews while a letter filter is active.
+/// Highlight styling for the focused window and the hovered preview.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowPickerSelection {
-    pub color: Color,
-    pub width: f64,
+    /// Label inversion color for the window that had focus when the picker opened.
+    pub focused_color: Color,
+    /// Accent color for the hovered preview: glow and inverted label.
+    pub hover_color: Color,
+    /// Soft accent glow behind the hovered preview.
+    pub glow: bool,
 }
 
 impl Default for WindowPickerSelection {
     fn default() -> Self {
         Self {
-            color: Color::from_rgba8_unpremul(115, 218, 202, 110),
-            width: 26.,
+            focused_color: Color::from_rgba8_unpremul(115, 218, 202, 255),
+            hover_color: Color::from_rgba8_unpremul(115, 218, 202, 255),
+            glow: true,
         }
     }
 }
@@ -157,11 +159,12 @@ impl Default for WindowPickerSelection {
 #[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
 pub struct WindowPickerSelectionPart {
     #[knuffel(child)]
-    pub active_color: Option<Color>,
+    pub focused_color: Option<Color>,
+    #[knuffel(child)]
+    pub hover_color: Option<Color>,
     #[knuffel(child, unwrap(argument))]
-    pub width: Option<FloatOrInt<2, 200>>,
+    pub glow: Option<bool>,
 }
-
 
 /// Configuration for the keyboard-driven window picker.
 #[derive(Debug, Clone, PartialEq)]
@@ -237,12 +240,12 @@ impl MergeWith<WindowPickerPart> for WindowPicker {
             self.animation = anim.into_override();
         }
         if let Some(selection) = &part.selection {
-            if let Some(color) = selection.active_color {
-                self.selection.color = color;
-            }
-            if let Some(width) = selection.width {
-                self.selection.width = width.0;
-            }
+            merge_clone!(
+                (self.selection, selection),
+                focused_color,
+                hover_color,
+                glow
+            );
         }
     }
 }

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::mem;
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::ensure;
 use niri_config::{Color, Config, CornerRadius, WindowPickerLabel};
@@ -20,7 +21,6 @@ use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 
 use crate::animation::{Animation, Clock};
-use crate::layout::focus_ring::{FocusRing, FocusRingRenderElement};
 use crate::layout::{LayoutElement as _, LayoutElementRenderElement};
 use crate::niri::Niri;
 use crate::niri_render_elements;
@@ -30,6 +30,7 @@ use crate::render_helpers::clipped_surface::ClippedSurfaceRenderElement;
 use crate::render_helpers::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement};
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::RenderCtx;
@@ -39,6 +40,20 @@ use crate::window::Mapped;
 
 const MAX_WINDOWS: usize = 26 * 26;
 const PREFIX_DIM_ALPHA: f32 = 0.22;
+/// Zoom applied to the hovered preview.
+const HOVER_SCALE: f64 = 1.03;
+/// How far the label overlaps the top edge of its preview (fraction of label height).
+const LABEL_OVERLAP: f64 = 0.35;
+/// Gaussian sigma of the hover glow.
+const GLOW_SIGMA: f64 = 22.;
+
+/// Visual style of a label texture: keycaps invert while their preview is hovered or
+/// focused, and show the already-typed prefix letter in the accent color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LabelStyle {
+    highlighted: bool,
+    typed_len: u8,
+}
 
 type PickerTexture = TextureBuffer<GlesTexture>;
 
@@ -55,7 +70,7 @@ niri_render_elements! {
         Label = PrimaryGpuTextureRenderElement,
         SolidColor = SolidColorRenderElement,
         FramebufferEffect = FramebufferEffectElement,
-        Ring = FocusRingRenderElement,
+        Shadow = ShadowRenderElement,
     }
 }
 
@@ -99,7 +114,10 @@ impl WindowPickerSession {
         }
 
         // Keep the focus marker only if the focused window survived truncation.
-        if !windows.iter().any(|(id, _)| Some(id) == focused_id.as_ref()) {
+        if !windows
+            .iter()
+            .any(|(id, _)| Some(id) == focused_id.as_ref())
+        {
             focused_id = None;
         }
 
@@ -165,7 +183,8 @@ fn ease_out_cubic(progress: f64) -> f64 {
 struct LabelCache {
     scale: f64,
     config: Option<WindowPickerLabel>,
-    textures: HashMap<String, Option<PickerTexture>>,
+    accent: Option<Color>,
+    textures: HashMap<(String, LabelStyle), Option<PickerTexture>>,
 }
 
 impl LabelCache {
@@ -173,18 +192,26 @@ impl LabelCache {
         &mut self,
         renderer: &mut GlesRenderer,
         label: &str,
+        style: LabelStyle,
         scale: f64,
         config: &WindowPickerLabel,
+        accent: Color,
     ) -> Option<PickerTexture> {
-        if self.scale != scale || self.config.as_ref() != Some(config) {
+        if self.scale != scale
+            || self.config.as_ref() != Some(config)
+            || self.accent != Some(accent)
+        {
             self.scale = scale;
             self.config = Some(config.clone());
+            self.accent = Some(accent);
             self.textures.clear();
         }
 
         self.textures
-            .entry(label.to_owned())
-            .or_insert_with(|| generate_label_texture(renderer, label, scale, config).ok())
+            .entry((label.to_owned(), style))
+            .or_insert_with(|| {
+                generate_label_texture(renderer, label, style, scale, config, accent).ok()
+            })
             .clone()
     }
 
@@ -198,14 +225,17 @@ impl LabelCache {
             return None;
         }
 
+        // All style variants share the same text and padding, hence the same size.
         self.textures
-            .get(label)
-            .and_then(Option::as_ref)
+            .iter()
+            .find(|((cached, _), _)| cached == label)
+            .and_then(|(_, texture)| texture.as_ref())
             .map(PickerTexture::logical_size)
     }
 
     fn clear(&mut self) {
         self.config = None;
+        self.accent = None;
         self.textures.clear();
     }
 }
@@ -226,7 +256,9 @@ pub struct WindowPickerUi {
     fly_back: Option<MappedId>,
     /// Preview the cursor is currently over (hover highlight).
     hover: Option<MappedId>,
-    selection_ring: RefCell<FocusRing>,
+    /// When the current hover started, for the zoom-in animation.
+    hover_started_at: Option<Duration>,
+    glow: RefCell<ShadowRenderElement>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,23 +277,13 @@ impl WindowPickerUi {
             framebuffer_effect: RefCell::new(FramebufferEffect::new()),
             fly_back: None,
             hover: None,
-            selection_ring: RefCell::new(FocusRing::new(niri_config::FocusRing {
-                off: false,
-                width: 26.,
-                active_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
-                inactive_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
-                urgent_color: Color::from_rgba8_unpremul(115, 218, 202, 110),
-                active_gradient: None,
-                inactive_gradient: None,
-                urgent_gradient: None,
-            })),
+            hover_started_at: None,
+            glow: RefCell::new(ShadowRenderElement::empty()),
         }
     }
 
     fn progress(&self) -> f64 {
-        self.state
-            .anim()
-            .map_or(0., Animation::clamped_value)
+        self.state.anim().map_or(0., Animation::clamped_value)
     }
 
     fn raw_progress(&self) -> f64 {
@@ -293,6 +315,7 @@ impl WindowPickerUi {
         self.framebuffer_effect.get_mut().damage();
         self.fly_back = None;
         self.hover = None;
+        self.hover_started_at = None;
         self.state = WindowPickerState::Open { session, anim };
     }
 
@@ -354,16 +377,28 @@ impl WindowPickerUi {
     /// Returns whether the hovered entry changed, so the caller can queue a redraw.
     pub fn set_hover(&mut self, id: Option<MappedId>) -> bool {
         let changed = self.hover != id;
-        self.hover = id;
+        if changed {
+            self.hover = id;
+            self.hover_started_at = match (id, self.state.session()) {
+                (Some(_), Some(session)) => Some(session.clock.now()),
+                _ => None,
+            };
+        }
         changed
+    }
+
+    /// Current zoom factor of the hovered preview, easing in over 90 ms.
+    fn hover_zoom(&self, session: &WindowPickerSession) -> f64 {
+        let Some(started) = self.hover_started_at else {
+            return 1.;
+        };
+        let t = session.clock.now().saturating_sub(started).as_secs_f64() / 0.09;
+        1. + (HOVER_SCALE - 1.) * ease_out_cubic(t.clamp(0., 1.))
     }
 
     pub fn advance_animations(&mut self) -> bool {
         let finished = matches!(self.state, WindowPickerState::Closing { .. })
-            && self
-                .state
-                .anim()
-                .is_some_and(Animation::is_clamped_done);
+            && self.state.anim().is_some_and(Animation::is_clamped_done);
         if finished {
             self.close_immediately();
         }
@@ -493,7 +528,14 @@ impl WindowPickerUi {
             .iter()
             .zip(layout.placements)
             .find_map(|(window, placement)| {
-                let preview = animate_rect(placement.preview, output_size, progress);
+                let mut preview = animate_rect(placement.preview, output_size, progress);
+                // Match the zoomed hover feedback so the grown edges stay clickable.
+                if self.hover == Some(window.entry.id) {
+                    let zoom = self.hover_zoom(session);
+                    let center = preview.loc + preview.size.to_point().upscale(0.5);
+                    let zoomed = preview.size.upscale(zoom);
+                    preview = Rectangle::new(center - zoomed.to_point().upscale(0.5), zoomed);
+                }
                 preview
                     .contains(pos_within_output)
                     .then_some(window.entry.id)
@@ -509,13 +551,16 @@ impl WindowPickerUi {
             return true;
         }
 
-        // Keep redrawing while a letter filter is active or a preview is hovered so the
-        // selection ring can breathe.
-        matches!(
-            &self.state,
-            WindowPickerState::Open { session, .. }
-                if session.prefix.is_some() || self.hover.is_some()
-        )
+        // Keep redrawing while a preview is hovered so the glow can pulse and the
+        // hover zoom can ease in.
+        let WindowPickerState::Open { session, .. } = &self.state else {
+            return false;
+        };
+        if self.hover.is_none() {
+            return false;
+        }
+        let config = self.config.borrow().window_picker.clone();
+        config.selection.glow || self.hover_zoom(session) < HOVER_SCALE
     }
 
     pub fn render_output<R: NiriRenderer>(
@@ -538,13 +583,27 @@ impl WindowPickerUi {
         let scale = output.current_scale().fractional_scale();
 
         if *output == session.output {
+            let selection = config.selection;
             let mut windows = picker_windows(niri, session, &config.label);
             for window in &mut windows {
+                let highlighted = !closing
+                    && (self.hover == Some(window.entry.id)
+                        || session.focused_id == Some(window.entry.id));
+                let typed_len = match session.prefix {
+                    Some(prefix) if window.entry.label.starts_with(prefix) => 1,
+                    _ => 0,
+                };
+                let style = LabelStyle {
+                    highlighted,
+                    typed_len,
+                };
                 let texture = self.label_cache.borrow_mut().get(
                     ctx.as_gles().renderer,
                     &window.entry.label,
+                    style,
                     scale,
                     &config.label,
+                    selection.hover_color,
                 );
                 if let Some(texture) = &texture {
                     window.label_size = texture.logical_size();
@@ -564,11 +623,11 @@ impl WindowPickerUi {
                 0.
             };
 
-            // Breathe the selection ring.
-            let ring_pulse = 0.72 + 0.28 * (session.clock.now().as_secs_f64() * 4.0).sin();
+            // Subtle breathing of the hover glow; window contents never pulse.
+            let glow_pulse = 0.8 + 0.2 * (session.clock.now().as_secs_f64() * 3.0).sin();
 
             if let Some(layout) = compute_grid(size, &inputs, &config) {
-                let mut ring = self.selection_ring.borrow_mut();
+                let mut glow = self.glow.borrow_mut();
                 for (i, (window, placement)) in windows.iter().zip(layout.placements).enumerate() {
                     let ord = if closing { count - 1 - i } else { i };
                     let span = 1. - frac * (count.saturating_sub(1)) as f64;
@@ -579,6 +638,9 @@ impl WindowPickerUi {
                     } else {
                         ease_out_cubic(local_t)
                     };
+
+                    let hovered = self.hover == Some(window.entry.id);
+                    let focused = session.focused_id == Some(window.entry.id);
 
                     let mut preview = animate_rect(placement.preview, size, eased);
                     let mut entry_alpha = if session
@@ -601,42 +663,16 @@ impl WindowPickerUi {
                         entry_alpha = ((progress - 0.12) / 0.3).clamp(0., 1.) as f32;
                     } else if closing {
                         entry_alpha *= ((progress * 1.6).clamp(0., 1.)) as f32;
+                    } else if hovered {
+                        let zoom = self.hover_zoom(session);
+                        let center = preview.loc + preview.size.to_point().upscale(0.5);
+                        let zoomed = preview.size.upscale(zoom);
+                        preview = Rectangle::new(center - zoomed.to_point().upscale(0.5), zoomed);
                     }
 
-                    // Selection highlight ring behind the hovered preview, previews matching
-                    // the active letter filter, and the currently focused window.
-                    let ring_match = self.hover == Some(window.entry.id)
-                        || session
-                            .prefix
-                            .is_some_and(|prefix| window.entry.label.starts_with(prefix))
-                        || session.focused_id == Some(window.entry.id);
-                    if !closing && ring_match && config.selection.width > 0.
-                    {
-                        let color = config.selection.color * ring_pulse as f32;
-                        ring.update_config(niri_config::FocusRing {
-                            off: false,
-                            width: config.selection.width,
-                            active_color: color,
-                            inactive_color: color,
-                            urgent_color: color,
-                            active_gradient: None,
-                            inactive_gradient: None,
-                            urgent_gradient: None,
-                        });
-                        ring.update_render_elements(
-                            preview.size,
-                            true,
-                            false,
-                            false,
-                            Rectangle::from_size(size),
-                            CornerRadius::from(config.selection.width.min(16.) as f32),
-                            scale,
-                            entry_alpha,
-                        );
-                        ring.render(ctx.renderer, preview.loc, &mut |elem| {
-                            push(WindowPickerUiRenderElement::Ring(elem));
-                        });
-                    }
+                    let geo_size = window.mapped.size().to_f64();
+                    let thumb_scale = preview.size.w / geo_size.w.max(f64::EPSILON);
+                    let thumb_radius = thumb_corner_radius(window.mapped);
 
                     let final_center =
                         placement.preview.loc + placement.preview.size.to_point().upscale(0.5);
@@ -657,6 +693,39 @@ impl WindowPickerUi {
                     }
 
                     render_thumbnail(ctx.r(), scale, window.mapped, preview, entry_alpha, push);
+
+                    // Accent glow behind the preview: strong and gently breathing on
+                    // hover; static and dimmer for the window that had focus on open.
+                    // Pushed after the thumbnail so it stays behind it, spilling past
+                    // the edges.
+                    let glow_style = if closing || !selection.glow {
+                        None
+                    } else if hovered {
+                        Some((selection.hover_color, alpha * glow_pulse as f32 * 0.9))
+                    } else if focused {
+                        Some((selection.focused_color, entry_alpha * 0.55))
+                    } else {
+                        None
+                    };
+                    if let Some((color, glow_alpha)) = glow_style {
+                        let margin = (GLOW_SIGMA * 3.).ceil();
+                        let shader_size = preview.size + Size::from((margin, margin)).upscale(2.);
+                        glow.update(
+                            shader_size,
+                            Rectangle::new(Point::from((margin, margin)), preview.size),
+                            color,
+                            GLOW_SIGMA as f32,
+                            thumb_radius.scaled_by(thumb_scale as f32).expanded_by(4.),
+                            scale as f32,
+                            Rectangle::zero(),
+                            CornerRadius::default(),
+                            glow_alpha,
+                        );
+                        push(WindowPickerUiRenderElement::Shadow(
+                            glow.clone()
+                                .with_location(preview.loc - Point::from((margin, margin))),
+                        ));
+                    }
                 }
             }
         }
@@ -681,7 +750,11 @@ impl WindowPickerUi {
         // entirely at the very end, so it never lingers after the motion is done.
         let progress = if closing {
             let fast = (progress * 1.8).clamp(0., 1.);
-            if progress <= 0.02 { 0. } else { fast }
+            if progress <= 0.02 {
+                0.
+            } else {
+                fast
+            }
         } else {
             progress
         };
@@ -793,6 +866,14 @@ fn grid_inputs(windows: &[RenderedWindow<'_>]) -> Vec<GridInput> {
         .collect()
 }
 
+fn thumb_corner_radius(mapped: &Mapped) -> CornerRadius {
+    if mapped.sizing_mode().is_normal() {
+        mapped.geometry_corner_radius()
+    } else {
+        CornerRadius::default()
+    }
+}
+
 fn render_thumbnail<R: NiriRenderer>(
     mut ctx: RenderCtx<R>,
     output_scale: f64,
@@ -802,11 +883,7 @@ fn render_thumbnail<R: NiriRenderer>(
     push: &mut dyn FnMut(WindowPickerUiRenderElement<R>),
 ) {
     let geo = Rectangle::from_size(mapped.size().to_f64());
-    let radius = if mapped.sizing_mode().is_normal() {
-        mapped.geometry_corner_radius()
-    } else {
-        CornerRadius::default()
-    };
+    let radius = thumb_corner_radius(mapped);
 
     let scale = Scale::from(output_scale);
     let clip_shader = ClippedSurfaceRenderElement::shader(ctx.renderer).cloned();
@@ -1002,9 +1079,10 @@ fn compute_grid(
                 + (metrics.row_window_heights[row] - preview_size.h) / 2.,
         );
         let label_size = input.label_size.upscale(chrome_scale);
+        // Anchor the keycap to its window by overlapping the preview's top edge.
         let label_loc = Point::new(
             preview_loc.x + (preview_size.w - label_size.w) / 2.,
-            preview_loc.y - label_gap - label_size.h,
+            preview_loc.y - label_size.h * (1. - LABEL_OVERLAP),
         );
         placements.push(Placement {
             preview: Rectangle::new(preview_loc, preview_size),
@@ -1039,7 +1117,7 @@ fn compute_single_window(
     );
     let label_loc = Point::new(
         preview_loc.x + (preview_size.w - input.label_size.w) / 2.,
-        preview_loc.y - label_gap - input.label_size.h,
+        preview_loc.y - input.label_size.h * (1. - LABEL_OVERLAP),
     );
 
     Some(GridLayout {
@@ -1120,16 +1198,53 @@ fn estimated_label_size(label: &str, config: &WindowPickerLabel) -> Size<f64, Lo
     ))
 }
 
+fn lighten(color: Color, amount: f32) -> Color {
+    let mix = |c: f32| c + (1. - c) * amount;
+    Color::new_unpremul(mix(color.r), mix(color.g), mix(color.b), color.a)
+}
+
+fn darken(color: Color, amount: f32) -> Color {
+    let mix = |c: f32| c * (1. - amount);
+    Color::new_unpremul(mix(color.r), mix(color.g), mix(color.b), color.a)
+}
+
+fn hex(color: Color) -> String {
+    let channel = |c: f32| (c.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(color.r),
+        channel(color.g),
+        channel(color.b)
+    )
+}
+
 fn generate_label_texture(
     renderer: &mut GlesRenderer,
     label: &str,
+    style: LabelStyle,
     scale: f64,
     config: &WindowPickerLabel,
+    accent: Color,
 ) -> anyhow::Result<PickerTexture> {
     let _span = tracy_client::span!("window_picker::generate_label_texture");
 
     let mut font = FontDescription::from_string(&config.font);
     font.set_absolute_size(config.size * scale * f64::from(pango::SCALE));
+
+    // Color spans for the already-typed prefix letters. Labels are plain A-Z, so no
+    // markup escaping is needed.
+    let markup = if style.typed_len > 0 && label.len() > 1 {
+        let typed = &label[..usize::from(style.typed_len)];
+        let rest = &label[usize::from(style.typed_len)..];
+        if style.highlighted {
+            // On an inverted keycap the typed letters are underlined instead.
+            format!("<span underline=\"single\">{typed}</span>{rest}")
+        } else {
+            format!("<span foreground=\"{}\">{typed}</span>{rest}", hex(accent))
+        }
+    } else {
+        label.to_owned()
+    };
 
     let dummy = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
     let cr = cairo::Context::new(&dummy)?;
@@ -1137,7 +1252,7 @@ fn generate_label_texture(
     layout.context().set_round_glyph_positions(false);
     layout.set_single_paragraph_mode(true);
     layout.set_font_description(Some(&font));
-    layout.set_text(label);
+    layout.set_markup(&markup);
     let (text_width, text_height) = layout.pixel_size();
     ensure!(text_width > 0 && text_height > 0);
 
@@ -1161,33 +1276,75 @@ fn generate_label_texture(
     let y = f64::from(shadow);
     let panel_width = f64::from(width - shadow * 2);
     let panel_height = f64::from(height - shadow * 2);
+    // The darker bottom strip faking key travel.
+    let key_depth = (scale * 2.).min(panel_height / 4.);
 
+    // Keycap faces swap roles when highlighted: the accent color becomes the key and
+    // the dark panel color becomes the text.
+    let (face, text) = if style.highlighted {
+        (accent, config.background_color)
+    } else {
+        (config.background_color, config.text_color)
+    };
+
+    // Soft drop shadow.
     rounded_rect(&cr, x, y + scale * 2., panel_width, panel_height, radius);
     cr.set_source_rgba(0., 0., 0., 0.38);
     cr.fill()?;
 
-    rounded_rect(&cr, x, y, panel_width, panel_height, radius);
-    set_source_color(&cr, config.background_color);
-    cr.fill_preserve()?;
-    set_source_color(&cr, config.border_color);
+    // Key edge: the face is raised by key_depth above a darker base.
+    rounded_rect(
+        &cr,
+        x,
+        y + key_depth,
+        panel_width,
+        panel_height - key_depth,
+        radius,
+    );
+    set_source_color(&cr, darken(face, 0.45));
+    cr.fill()?;
+
+    // Face with a subtle top-to-bottom gradient.
+    rounded_rect(&cr, x, y, panel_width, panel_height - key_depth, radius);
+    let gradient = cairo::LinearGradient::new(0., y, 0., y + panel_height - key_depth);
+    let top = lighten(face, 0.14);
+    gradient.add_color_stop_rgba(
+        0.,
+        f64::from(top.r),
+        f64::from(top.g),
+        f64::from(top.b),
+        f64::from(top.a),
+    );
+    gradient.add_color_stop_rgba(
+        1.,
+        f64::from(face.r),
+        f64::from(face.g),
+        f64::from(face.b),
+        f64::from(face.a),
+    );
+    cr.set_source(&gradient)?;
+    cr.fill()?;
+
+    // Faint outline for definition against the backdrop.
+    rounded_rect(&cr, x, y, panel_width, panel_height - key_depth, radius);
+    let outline = if style.highlighted {
+        lighten(accent, 0.35)
+    } else {
+        let mut color = config.border_color;
+        color.a *= 0.45;
+        color
+    };
+    set_source_color(&cr, outline);
     cr.set_line_width((scale * 1.25).max(1.));
     cr.stroke()?;
-
-    if panel_width > radius * 2. + 2. {
-        cr.move_to(x + radius, y + scale);
-        cr.line_to(x + panel_width - radius, y + scale);
-        cr.set_source_rgba(1., 1., 1., 0.16);
-        cr.set_line_width(scale.max(1.));
-        cr.stroke()?;
-    }
 
     let layout = pangocairo::functions::create_layout(&cr);
     layout.context().set_round_glyph_positions(false);
     layout.set_single_paragraph_mode(true);
     layout.set_font_description(Some(&font));
-    layout.set_text(label);
+    layout.set_markup(&markup);
     cr.move_to(f64::from(shadow + padding_x), f64::from(shadow + padding_y));
-    set_source_color(&cr, config.text_color);
+    set_source_color(&cr, text);
     pangocairo::functions::show_layout(&cr, &layout);
 
     drop(cr);

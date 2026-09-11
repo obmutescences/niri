@@ -426,12 +426,14 @@ window-picker {
     //     spring damping-ratio=0.65 stiffness=300 epsilon=0.0001
     // }
 
-    // Highlight ring drawn behind the previews matching your typed letter filter,
-    // breathing slowly while the filter is active. width is the soft pad size in
-    // logical pixels; set width 0 to disable.
+    // Highlight styling for the focused window and the hovered preview.
+    // The window that had focus when the picker opened gets an inverted letter
+    // label; hovering a preview adds a strong accent glow, a slight zoom and
+    // inverts its letter label. glow false disables the hover glow.
     // selection {
-    //     active-color "#73daca88"
-    //     width 26
+    //     focused-color "#73dacaff"
+    //     hover-color "#73dacaff"
+    //     glow true
     // }
 }
 
