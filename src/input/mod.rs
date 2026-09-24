@@ -12,7 +12,7 @@ use niri_ipc::LayoutSwitchTarget;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, DeviceCapability, Event,
     GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
-    InputEvent, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
+    InputEvent, InputTime, KeyState, KeyboardKeyEvent, Keycode, MouseButton, PointerAxisEvent,
     PointerButtonEvent, PointerMotionEvent, ProximityState, Switch, SwitchState, SwitchToggleEvent,
     TabletToolButtonEvent, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
     TabletToolTipState, TouchEvent,
@@ -2393,17 +2393,16 @@ impl State {
                 if let Some(session) = WindowPickerSession::collect(&self.niri) {
                     // The picker is modal. Finish any compositor-side pointer/tablet operation
                     // that may have started before the keyboard shortcut was pressed.
-                    let time = get_monotonic_time().as_millis() as u32;
+                    let time = InputTime::now();
                     self.niri.seat.get_pointer().unwrap().unset_grab(
                         self,
                         SERIAL_COUNTER.next_serial(),
                         time,
                     );
-                    self.niri.seat.tablet_seat().with_tools(|tools| {
-                        for tool in tools.values() {
-                            tool.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
-                        }
-                    });
+                    let tools = self.niri.seat.tablet_seat().get_tools();
+                    for tool in tools.values() {
+                        tool.unset_grab(self, SERIAL_COUNTER.next_serial(), time);
+                    }
 
                     self.niri.window_picker_ui.open(session);
                     self.niri.queue_redraw_all();
@@ -2935,7 +2934,7 @@ impl State {
                     button: button_code,
                     state: button_state,
                     serial,
-                    time: event.time_msec(),
+                    time: event.time(),
                 },
             );
             pointer.frame(self);
