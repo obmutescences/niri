@@ -1903,12 +1903,8 @@ where
                     };
 
                     // Preserve a previously set duration-ms.
-                    let duration_ms = easing_params
-                        .map_or(200, |p| p.duration_ms);
-                    easing_params = Some(EasingParams {
-                        duration_ms,
-                        curve,
-                    });
+                    let duration_ms = easing_params.map_or(200, |p| p.duration_ms);
+                    easing_params = Some(EasingParams { duration_ms, curve });
                 }
                 name_str => {
                     ctx.emit_error(DecodeError::unexpected(
@@ -2067,8 +2063,6 @@ where
 
 #[cfg(test)]
 mod workspace_switch_3d_tests {
-    use super::*;
-
     #[test]
     fn workspace_switch_3d_default_off() {
         let config = r#"
@@ -2237,13 +2231,16 @@ mod workspace_dip_tests {
         let parsed = crate::Config::parse_mem(config).unwrap();
         let dip = parsed.layout.workspace_dip;
         assert!(dip.enabled);
-        assert_eq!(dip.anim, Some(Animation {
-            off: false,
-            kind: Kind::Easing(EasingParams {
-                duration_ms: 300,
-                curve: Curve::EaseOutQuad,
-            }),
-        }));
+        assert_eq!(
+            dip.anim,
+            Some(Animation {
+                off: false,
+                kind: Kind::Easing(EasingParams {
+                    duration_ms: 300,
+                    curve: Curve::EaseOutQuad,
+                }),
+            })
+        );
     }
 
     #[test]
@@ -2259,14 +2256,17 @@ mod workspace_dip_tests {
         let parsed = crate::Config::parse_mem(config).unwrap();
         let dip = parsed.layout.workspace_dip;
         assert!(dip.enabled);
-        assert_eq!(dip.anim, Some(Animation {
-            off: false,
-            kind: Kind::Spring(SpringParams {
-                damping_ratio: 0.55,
-                stiffness: 350,
-                epsilon: 0.001,
-            }),
-        }));
+        assert_eq!(
+            dip.anim,
+            Some(Animation {
+                off: false,
+                kind: Kind::Spring(SpringParams {
+                    damping_ratio: 0.55,
+                    stiffness: 350,
+                    epsilon: 0.001,
+                }),
+            })
+        );
     }
 
     #[test]
