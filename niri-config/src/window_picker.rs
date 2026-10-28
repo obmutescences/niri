@@ -471,7 +471,7 @@ mod tests {
 
         let bind = config.binds.0.first().unwrap();
         assert_eq!(bind.key.trigger, Trigger::Keysym(Keysym::Tab));
-        assert_eq!(bind.action, Action::ToggleWindowPicker);
+        assert_eq!(bind.press_action(), Some(&Action::ToggleWindowPicker));
         assert!(!bind.repeat);
     }
 }
