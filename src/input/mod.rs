@@ -681,24 +681,32 @@ impl State {
                         return ShouldInterceptResult::Forward;
                     }
 
-                    let toggle_bind = raw.iter().find_map(|raw| {
-                        find_configured_bind(
-                            this.niri.config.borrow().binds.0.iter(),
-                            mod_key,
-                            Trigger::Keysym(*raw),
-                            *mods,
-                        )
-                        .filter(|bind| {
-                            matches!(bind.press_action(), Some(Action::ToggleWindowPicker))
-                        })
-                    });
+                    let toggle_bind =
+                        modified
+                            .into_iter()
+                            .chain(raw.iter().copied())
+                            .find_map(|raw| {
+                                find_configured_bind(
+                                    this.niri.config.borrow().binds.0.iter(),
+                                    mod_key,
+                                    Trigger::Keysym(raw),
+                                    *mods,
+                                )
+                                .filter(|bind| {
+                                    matches!(bind.press_action(), Some(Action::ToggleWindowPicker))
+                                })
+                            });
                     this.niri.suppressed_keys.insert(key_code);
                     if let Some(bind) = toggle_bind {
                         return ShouldInterceptResult::InterceptAndHandle(bind);
                     }
 
-                    if let Some(raw) = raw.first() {
-                        let result = this.niri.window_picker_ui.handle_key(*raw);
+                    // `raw` only holds keysyms that differ from `modified`, so a plain key on a
+                    // latin layout leaves it empty. Fall back to the modified keysym for the
+                    // picker, mirroring the old raw_latin_sym_or_raw_current_sym() behavior.
+                    let picker_key = raw.first().copied().or(modified);
+                    if let Some(key) = picker_key {
+                        let result = this.niri.window_picker_ui.handle_key(key);
                         this.niri.queue_redraw_all();
 
                         if let WindowPickerKeyResult::Selected(id) = result {

@@ -10,6 +10,7 @@ mod binds;
 mod floating;
 mod fullscreen;
 mod layer_shell;
+mod window_picker;
 mod remove_output;
 mod renderer_cleanup;
 mod transactions;
