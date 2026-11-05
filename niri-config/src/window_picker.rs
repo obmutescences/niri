@@ -2,6 +2,9 @@ use knuffel::errors::DecodeError;
 
 use crate::animations::{Animation, Curve, EasingParams, Kind as AnimKind, SpringParams};
 use crate::utils::{expect_only_children, parse_arg_node, MergeWith};
+use crate::window_picker_card::{
+    WindowPickerCard, WindowPickerCardPart, WindowPickerMotion, WindowPickerMotionPart,
+};
 use crate::{Color, FloatOrInt};
 
 /// Optional easing/spring override for the picker open/close animations.
@@ -183,6 +186,10 @@ pub struct WindowPicker {
     pub animation: WindowPickerAnim,
     /// Highlight ring for previews matching the active letter filter.
     pub selection: WindowPickerSelection,
+    /// Card background and the app metadata strip below the preview.
+    pub card: WindowPickerCard,
+    /// Entry animation style; all styles share the global open/close duration.
+    pub motion: WindowPickerMotion,
 }
 
 impl Default for WindowPicker {
@@ -199,6 +206,8 @@ impl Default for WindowPicker {
             stagger_ms: 28,
             animation: WindowPickerAnim::default(),
             selection: WindowPickerSelection::default(),
+            card: WindowPickerCard::default(),
+            motion: WindowPickerMotion::default(),
         }
     }
 }
@@ -227,6 +236,10 @@ pub struct WindowPickerPart {
     pub animation: Option<WindowPickerAnimPart>,
     #[knuffel(child)]
     pub selection: Option<WindowPickerSelectionPart>,
+    #[knuffel(child)]
+    pub card: Option<WindowPickerCardPart>,
+    #[knuffel(child)]
+    pub motion: Option<WindowPickerMotionPart>,
 }
 
 impl MergeWith<WindowPickerPart> for WindowPicker {
@@ -247,6 +260,12 @@ impl MergeWith<WindowPickerPart> for WindowPicker {
                 glow
             );
         }
+        if let Some(card) = &part.card {
+            self.card.merge_with(card);
+        }
+        if let Some(motion) = &part.motion {
+            self.motion.merge_with(motion);
+        }
     }
 }
 
@@ -261,6 +280,8 @@ pub struct WindowPickerLabel {
     pub padding_y: f64,
     pub gap: f64,
     pub corner_radius: f64,
+    /// Letters used for single-letter labels, in order. Empty means A–Z then AA–ZZ.
+    pub letters: String,
 }
 
 impl Default for WindowPickerLabel {
@@ -275,6 +296,7 @@ impl Default for WindowPickerLabel {
             padding_y: 7.,
             gap: 12.,
             corner_radius: 8.,
+            letters: String::new(),
         }
     }
 }
@@ -299,6 +321,10 @@ pub struct WindowPickerLabelPart {
     pub gap: Option<FloatOrInt<0, 65535>>,
     #[knuffel(child, unwrap(argument))]
     pub corner_radius: Option<FloatOrInt<0, 65535>>,
+    /// Custom single-letter alphabet. If it cannot cover all windows, labels
+    /// switch to random two-letter combinations.
+    #[knuffel(child, unwrap(argument))]
+    pub letters: Option<String>,
 }
 
 impl MergeWith<WindowPickerLabelPart> for WindowPickerLabel {
@@ -308,7 +334,8 @@ impl MergeWith<WindowPickerLabelPart> for WindowPickerLabel {
             font,
             text_color,
             background_color,
-            border_color
+            border_color,
+            letters
         );
         merge!((self, part), size, padding_x, padding_y, gap, corner_radius,);
     }

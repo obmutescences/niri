@@ -395,6 +395,9 @@ window-picker {
         padding-y 7
         gap 12
         corner-radius 8
+        // Optional custom single-letter alphabet, in order.
+        // If it has fewer letters than windows, labels become random two-letter combinations.
+        // letters "ASDFGHJKL"
     }
 
     // These effects apply to the desktop as a whole; previews and labels stay sharp.
@@ -413,6 +416,42 @@ window-picker {
     animation-ms-open 180
     animation-ms-close 180
 
+    // Cards: rounded glass backing behind each preview, plus the app metadata
+    // strip below the window. `off` restores the old preview-only look.
+    card {
+        corner-radius 14
+        shadow true
+
+        info {
+            font "Sans"
+            title-size 13.5
+            app-id-size 10
+            workspace-size 9.5
+            title-color "#f6fbfcff"
+            app-id-color "#d6e8ee96"
+            workspace-color "#e8f7f9c8"
+            padding-x 12
+            padding-y 9
+            height 58
+        }
+
+        // Per-card blur of the already blurred backdrop. Turn off on slower GPUs
+        // or at 4K; the translucent card fill remains usable without it.
+        blur {
+            on
+            passes 2
+            offset 2
+        }
+    }
+
+    // Entry/exit motion. All styles share animation-ms-open/close above.
+    // Styles: pop | slide | drop | burst | vortex | flip | cascade | orbit | wave | zoom | cycle.
+    // "cycle" walks the ten styles in order, one per card, continuing across openings.
+    // "random" is an alias.
+    motion {
+        style "slide"
+    }
+
     // Stagger between consecutive previews flying in (milliseconds). 0 makes all
     // previews move as one. On close the order is reversed (last in, first out).
     // stagger-ms 28
@@ -429,8 +468,8 @@ window-picker {
 
     // Highlight styling for the focused window and the hovered preview.
     // The window that had focus when the picker opened gets an inverted letter
-    // label; hovering a preview adds a strong accent glow, a slight zoom and
-    // inverts its letter label. glow false disables the hover glow.
+    // label and a breathing accent glow; hovering a preview adds a stronger glow,
+    // a slight zoom and inverts its letter label. glow false disables both.
     // selection {
     //     focused-color "#73dacaff"
     //     hover-color "#73dacaff"

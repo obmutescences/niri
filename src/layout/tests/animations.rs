@@ -91,10 +91,7 @@ fn workspace_dip_independent_duration_is_honored() {
             MonitorSet::Normal { monitors, .. } => &monitors[0],
             MonitorSet::NoOutputs { .. } => unreachable!(),
         };
-        assert!(
-            mon.workspace_switch.is_some(),
-            "switch must be animating"
-        );
+        assert!(mon.workspace_switch.is_some(), "switch must be animating");
     }
 
     // t=0: no dip yet.

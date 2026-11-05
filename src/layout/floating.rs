@@ -1179,7 +1179,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.interactive_resize = None;
     }
 
-    pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+    pub fn refresh(&mut self, is_active: bool, is_focused: bool, layout_has_keyboard_focus: bool) {
         let active = self.active_window_id.clone();
         let is_solo_window = self.options.layout.focus_animation.enabled
             && self.options.layout.focus_animation.scale.enabled
@@ -1193,7 +1193,13 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
             let is_focused_now = is_tile_active && is_focused;
 
-            tile.update_focus_animation(&self.options.layout, is_focused_now, is_solo_window, true);
+            tile.update_focus_animation(
+                &self.options.layout,
+                is_focused_now,
+                is_solo_window,
+                true,
+                layout_has_keyboard_focus,
+            );
 
             let win = tile.window_mut();
 

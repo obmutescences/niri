@@ -1491,7 +1491,7 @@ impl Op {
                 }
             }
             Op::Refresh { is_active } => {
-                layout.refresh(is_active);
+                layout.refresh(is_active, is_active);
             }
             Op::AdvanceAnimations { msec_delta } => {
                 let mut now = layout.clock.now_unadjusted();

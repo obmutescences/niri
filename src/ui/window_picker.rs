@@ -6,7 +6,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::ensure;
-use niri_config::{Color, Config, CornerRadius, WindowPickerLabel};
+use niri_config::{
+    Color, Config, CornerRadius, WindowPickerInfo, WindowPickerLabel, WindowPickerMotionStyle,
+};
 use pango::FontDescription;
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
@@ -14,7 +16,7 @@ use smithay::backend::renderer::element::utils::{
     Relocate, RelocateRenderElement, RescaleRenderElement,
 };
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture, Uniform};
 use smithay::backend::renderer::Color32F;
 use smithay::input::keyboard::Keysym;
 use smithay::output::Output;
@@ -28,13 +30,16 @@ use crate::render_helpers::background_effect::RenderParams;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::clipped_surface::ClippedSurfaceRenderElement;
 use crate::render_helpers::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement};
+use crate::render_helpers::offscreen::OffscreenBuffer;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::shader_element::ShaderRenderElement;
+use crate::render_helpers::shaders::ProgramType;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::RenderCtx;
-use crate::utils::{output_size, to_physical_precise_round};
+use crate::utils::{output_size, to_physical_precise_round, with_toplevel_role};
 use crate::window::mapped::MappedId;
 use crate::window::Mapped;
 
@@ -43,7 +48,7 @@ const PREFIX_DIM_ALPHA: f32 = 0.22;
 /// Zoom applied to the hovered preview.
 const HOVER_SCALE: f64 = 1.03;
 /// How far the label overlaps the top edge of its preview (fraction of label height).
-const LABEL_OVERLAP: f64 = 0.35;
+const LABEL_OVERLAP: f64 = 1. / 3.;
 /// Gaussian sigma of the hover glow.
 const GLOW_SIGMA: f64 = 22.;
 
@@ -68,6 +73,7 @@ niri_render_elements! {
     WindowPickerUiRenderElement<R> => {
         Thumbnail = RelocateRenderElement<RescaleRenderElement<PickerThumbnailRenderElement<R>>>,
         Label = PrimaryGpuTextureRenderElement,
+        Card = ShaderRenderElement,
         SolidColor = SolidColorRenderElement,
         FramebufferEffect = FramebufferEffectElement,
         Shadow = ShadowRenderElement,
@@ -78,6 +84,10 @@ niri_render_elements! {
 struct PickerEntry {
     id: MappedId,
     label: String,
+    app_id: Option<String>,
+    title: Option<String>,
+    workspace: String,
+    motion: WindowPickerMotionStyle,
 }
 
 #[derive(Debug)]
@@ -93,9 +103,21 @@ pub struct WindowPickerSession {
 impl WindowPickerSession {
     pub fn collect(niri: &Niri) -> Option<Self> {
         let output = niri.layout.active_output()?.clone();
+        let custom_letters = niri.config.borrow().window_picker.label.letters.clone();
         let mut windows = Vec::new();
         let mut seen = HashSet::new();
         let mut focused_id = None;
+
+        let mut workspace_labels = HashMap::new();
+        for (_, ws_idx, ws) in niri.layout.workspaces() {
+            let label = ws
+                .name()
+                .cloned()
+                .unwrap_or_else(|| format!("ws {}", ws_idx + 1));
+            for mapped in ws.windows() {
+                workspace_labels.insert(mapped.id(), label.clone());
+            }
+        }
 
         for (_, mapped) in niri.layout.windows() {
             let size = mapped.size();
@@ -103,11 +125,24 @@ impl WindowPickerSession {
                 if mapped.is_focused() {
                     focused_id = Some(mapped.id());
                 }
-                windows.push((mapped.id(), mapped.get_focus_timestamp()));
+                let (app_id, title) = with_toplevel_role(mapped.toplevel(), |role| {
+                    (role.app_id.clone(), role.title.clone())
+                });
+                let workspace = workspace_labels
+                    .get(&mapped.id())
+                    .cloned()
+                    .unwrap_or_default();
+                windows.push((
+                    mapped.id(),
+                    mapped.get_focus_timestamp(),
+                    app_id,
+                    title,
+                    workspace,
+                ));
             }
         }
 
-        windows.sort_by(|(_, left), (_, right)| right.cmp(left));
+        windows.sort_by(|(_, left, ..), (_, right, ..)| right.cmp(left));
         windows.truncate(MAX_WINDOWS);
         if windows.is_empty() {
             return None;
@@ -116,16 +151,23 @@ impl WindowPickerSession {
         // Keep the focus marker only if the focused window survived truncation.
         if !windows
             .iter()
-            .any(|(id, _)| Some(id) == focused_id.as_ref())
+            .any(|(id, ..)| Some(id) == focused_id.as_ref())
         {
             focused_id = None;
         }
 
-        let labels = make_labels(windows.len());
+        let labels = make_labels(windows.len(), &custom_letters);
         let entries = windows
             .into_iter()
             .zip(labels)
-            .map(|((id, _), label)| PickerEntry { id, label })
+            .map(|((id, _, app_id, title, workspace), label)| PickerEntry {
+                id,
+                label,
+                app_id,
+                title,
+                workspace,
+                motion: WindowPickerMotionStyle::Slide,
+            })
             .collect();
         let clock = niri.clock.clone();
 
@@ -149,6 +191,8 @@ enum WindowPickerState {
     Closing {
         session: WindowPickerSession,
         anim: Animation,
+        /// Animation progress at the moment closing started.
+        from_progress: f64,
     },
 }
 
@@ -177,6 +221,267 @@ impl WindowPickerState {
 
 fn ease_out_cubic(progress: f64) -> f64 {
     1. - (1. - progress).powi(3)
+}
+
+fn ease_in_cubic(progress: f64) -> f64 {
+    progress * progress * progress
+}
+
+fn lerp(from: f64, to: f64, t: f64) -> f64 {
+    from + (to - from) * t
+}
+
+fn keyframe(t: f64, first: f64, mid: f64, last: f64, mid_at: f64) -> f64 {
+    if t < mid_at {
+        lerp(first, mid, ease_out_cubic(t / mid_at))
+    } else {
+        lerp(mid, last, ease_out_cubic((t - mid_at) / (1. - mid_at)))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CardTransform {
+    offset: Point<f64, Logical>,
+    scale: f64,
+    angle: f64,
+    alpha: f64,
+}
+
+impl CardTransform {
+    fn identity() -> Self {
+        Self {
+            offset: Point::from((0., 0.)),
+            scale: 1.,
+            angle: 0.,
+            alpha: 1.,
+        }
+    }
+}
+
+const MOTION_CYCLE: [WindowPickerMotionStyle; 10] = [
+    WindowPickerMotionStyle::Pop,
+    WindowPickerMotionStyle::Slide,
+    WindowPickerMotionStyle::Drop,
+    WindowPickerMotionStyle::Burst,
+    WindowPickerMotionStyle::Vortex,
+    WindowPickerMotionStyle::Flip,
+    WindowPickerMotionStyle::Cascade,
+    WindowPickerMotionStyle::Orbit,
+    WindowPickerMotionStyle::Wave,
+    WindowPickerMotionStyle::Zoom,
+];
+
+fn card_center(card: Rectangle<f64, Logical>) -> Point<f64, Logical> {
+    card.loc + card.size.to_point().upscale(0.5)
+}
+
+fn scale_rect(
+    rect: Rectangle<f64, Logical>,
+    pivot: Point<f64, Logical>,
+    scale: f64,
+    offset: Point<f64, Logical>,
+) -> Rectangle<f64, Logical> {
+    let center = rect.loc + rect.size.to_point().upscale(0.5);
+    let center = pivot + (center - pivot).upscale(scale) + offset;
+    let size = rect.size.upscale(scale);
+    Rectangle::new(center - size.to_point().upscale(0.5), size)
+}
+
+fn rotated_bounds(
+    size: Size<f64, Logical>,
+    pivot: Point<f64, Logical>,
+    angle: f64,
+    scale: f64,
+) -> (Size<f64, Logical>, Point<f64, Logical>) {
+    let (sin, cos) = angle.sin_cos();
+    let corners = [
+        (-pivot.x, -pivot.y),
+        (size.w - pivot.x, -pivot.y),
+        (size.w - pivot.x, size.h - pivot.y),
+        (-pivot.x, size.h - pivot.y),
+    ];
+    let mut min: Point<f64, Logical> = Point::from((f64::INFINITY, f64::INFINITY));
+    let mut max: Point<f64, Logical> = Point::from((f64::NEG_INFINITY, f64::NEG_INFINITY));
+    for (px, py) in corners {
+        let rx = (px * cos - py * sin) * scale;
+        let ry = (px * sin + py * cos) * scale;
+        min.x = min.x.min(rx);
+        min.y = min.y.min(ry);
+        max.x = max.x.max(rx);
+        max.y = max.y.max(ry);
+    }
+    let size = Size::from(((max.x - min.x).max(0.), (max.y - min.y).max(0.)));
+    let center = Point::from(((min.x + max.x) * 0.5, (min.y + max.y) * 0.5));
+    (size, center)
+}
+
+fn scatter_transform(
+    card: Rectangle<f64, Logical>,
+    output: Size<f64, Logical>,
+    t: f64,
+    index: usize,
+) -> CardTransform {
+    let t = ease_in_cubic(t.clamp(0., 1.));
+    let target_center = card_center(card);
+    let output_center = output.to_point().upscale(0.5);
+    let delta = target_center - output_center;
+    let mut angle = delta.y.atan2(delta.x);
+    if delta.x.abs() < f64::EPSILON && delta.y.abs() < f64::EPSILON {
+        angle = if index.is_multiple_of(2) { 0. } else { PI };
+    }
+    angle += if index.is_multiple_of(2) { -0.17 } else { 0.17 };
+    let distance = output.w.hypot(output.h) * 0.78;
+    let offset = Point::from((angle.cos(), angle.sin())).upscale(distance * t);
+    let rotation = if index.is_multiple_of(2) { -1. } else { 1. }
+        * (6. + (index % 3) as f64 * 2.).to_radians()
+        * t;
+    CardTransform {
+        offset,
+        scale: lerp(1., 0.82, t),
+        angle: rotation,
+        alpha: 1. - t,
+    }
+}
+
+fn slide_offset(
+    target_center: Point<f64, Logical>,
+    output: Size<f64, Logical>,
+    progress: f64,
+) -> Point<f64, Logical> {
+    let output_center = output.to_point().upscale(0.5);
+    let delta = target_center - output_center;
+    let (x, y) = if delta.x.abs() >= delta.y.abs() {
+        let x = if delta.x < 0. {
+            -output.w * 0.62
+        } else {
+            output.w * 0.62
+        };
+        (x, delta.y * 0.12)
+    } else {
+        let y = if delta.y < 0. {
+            -output.h * 0.62
+        } else {
+            output.h * 0.62
+        };
+        (delta.x * 0.12, y)
+    };
+    Point::from((x, y)).upscale(1. - progress)
+}
+
+fn open_transform(
+    style: WindowPickerMotionStyle,
+    card: Rectangle<f64, Logical>,
+    output: Size<f64, Logical>,
+    t: f64,
+    index: usize,
+) -> CardTransform {
+    let t = t.clamp(0., 1.);
+    let target_center = card_center(card);
+    let output_center = output.to_point().upscale(0.5);
+    let mut tf = CardTransform::identity();
+    match style {
+        WindowPickerMotionStyle::Pop => {
+            tf.scale = keyframe(t, 0.72, 1.035, 1., 0.72);
+            tf.alpha = ease_out_cubic(t);
+        }
+        WindowPickerMotionStyle::Slide => {
+            let e = ease_out_cubic(t);
+            tf.offset = slide_offset(target_center, output, e);
+            tf.scale = lerp(0.96, 1., e);
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Drop => {
+            let y = keyframe(t, -output.h * 0.78, 10., 0., 0.72);
+            tf.offset = Point::from((0., y));
+            tf.scale = keyframe(t, 0.95, 1.01, 1., 0.72);
+            tf.angle = keyframe(t, -1.5_f64.to_radians(), 0.3_f64.to_radians(), 0., 0.72);
+            tf.alpha = ease_out_cubic(t);
+        }
+        WindowPickerMotionStyle::Burst => {
+            let spin = if index.is_multiple_of(2) { -1. } else { 1. }
+                * (32. + (index % 4) as f64 * 9.).to_radians();
+            let e = ease_out_cubic(t);
+            tf.offset = (target_center - output_center).upscale(-(1. - e));
+            tf.scale = keyframe(t, 0.24, 1.04, 1., 0.72);
+            tf.angle = keyframe(t, spin, -spin * 0.14, 0., 0.72);
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Vortex => {
+            let spin = if index.is_multiple_of(2) { 1. } else { -1. }
+                * (155. + (index % 3) as f64 * 28.).to_radians();
+            let delta = target_center - output_center;
+            let radius = delta.x.hypot(delta.y);
+            let angle = delta.y.atan2(delta.x) + 0.95;
+            let mid = Point::from((angle.cos(), angle.sin())).upscale(radius * 0.48);
+            let start = Point::from((0., 0.));
+            let end = target_center - output_center;
+            let u = t;
+            let first = start + (mid - start).upscale(u);
+            let second = mid + (end - mid).upscale(u);
+            tf.offset = first + (second - first).upscale(u) - end;
+            tf.scale = keyframe(t, 0.38, 0.94, 1., 0.58);
+            tf.angle = keyframe(t, spin, spin * 0.26, 0., 0.58);
+            tf.alpha = ease_out_cubic(t);
+        }
+        WindowPickerMotionStyle::Flip => {
+            let dir = if index.is_multiple_of(2) { 1. } else { -1. };
+            let e = ease_out_cubic(t);
+            tf.angle = keyframe(t, dir * PI, dir * 0.22, 0., 0.72);
+            tf.scale = keyframe(t, 0.62, 1.035, 1., 0.72);
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Cascade => {
+            let delay = (index % 4) as f64 * 0.07;
+            let local = ((t - delay) / (1. - delay)).clamp(0., 1.);
+            let e = ease_out_cubic(local);
+            let dir = if index.is_multiple_of(2) { -1. } else { 1. };
+            let drop = output.h * (0.45 + (index % 3) as f64 * 0.08);
+            tf.offset = Point::from((dir * output.w * 0.08 * (1. - e), -drop * (1. - e)));
+            tf.scale = lerp(0.9, 1., e);
+            tf.angle = dir * (6. + (index % 3) as f64 * 3.).to_radians() * (1. - e);
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Orbit => {
+            let e = ease_out_cubic(t);
+            let dir = if index.is_multiple_of(2) { 1. } else { -1. };
+            let target_delta = target_center - output_center;
+            let target_angle = target_delta.y.atan2(target_delta.x);
+            let target_radius = target_delta.x.hypot(target_delta.y);
+            let start_angle = target_angle + dir * (1.6 + (index % 3) as f64 * 0.25);
+            let start_radius = output.w.hypot(output.h) * (0.42 + (index % 3) as f64 * 0.05);
+            let angle = lerp(start_angle, target_angle, e);
+            let radius = lerp(start_radius, target_radius, e);
+            let position = output_center + Point::from((angle.cos(), angle.sin())).upscale(radius);
+            tf.offset = position - target_center;
+            tf.scale = keyframe(t, 0.48, 1.025, 1., 0.7);
+            tf.angle = keyframe(
+                t,
+                dir * (0.7 + (index % 3) as f64 * 0.15),
+                -dir * 0.1,
+                0.,
+                0.7,
+            );
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Wave => {
+            let e = ease_out_cubic(t);
+            let dir = if index.is_multiple_of(2) { -1. } else { 1. };
+            let phase = index as f64 * 0.85;
+            let wobble = (phase + t * 2. * PI).sin() * output.h * 0.04 * (1. - e);
+            tf.offset = Point::from((dir * output.w * 0.66 * (1. - e), wobble));
+            tf.scale = keyframe(t, 0.94, 1.015, 1., 0.72);
+            tf.angle = dir * (7. + (index % 3) as f64 * 3.).to_radians() * (1. - e);
+            tf.alpha = e;
+        }
+        WindowPickerMotionStyle::Zoom => {
+            tf.scale = keyframe(t, 2.3, 0.98, 1., 0.8);
+            tf.angle = keyframe(t, 0.04, -0.01, 0., 0.8);
+            tf.alpha = ease_out_cubic(t);
+        }
+        // Cycle is resolved to a concrete style in `open` before rendering.
+        WindowPickerMotionStyle::Cycle => {}
+    }
+    tf
 }
 
 #[derive(Debug, Default)]
@@ -246,6 +551,78 @@ struct BackdropBuffers {
     tint: SolidColorBuffer,
 }
 
+#[derive(Debug, Default)]
+struct InfoCache {
+    scale: f64,
+    config: Option<WindowPickerInfo>,
+    textures: HashMap<InfoKey, Option<PickerTexture>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InfoKey {
+    app_id: String,
+    title: String,
+    workspace: String,
+    width: i32,
+    height: i32,
+    font_scale: i64,
+}
+
+impl InfoCache {
+    #[allow(clippy::too_many_arguments)]
+    fn get(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        app_id: &str,
+        title: &str,
+        workspace: &str,
+        width: f64,
+        height: f64,
+        font_scale: f64,
+        scale: f64,
+        config: &WindowPickerInfo,
+    ) -> Option<PickerTexture> {
+        if self.scale != scale || self.config.as_ref() != Some(config) {
+            self.scale = scale;
+            self.config = Some(config.clone());
+            self.textures.clear();
+        }
+
+        let width = to_physical_precise_round::<i32>(scale, width).max(1);
+        let height = to_physical_precise_round::<i32>(scale, height).max(1);
+        let key = InfoKey {
+            app_id: app_id.to_owned(),
+            title: truncate_title(title),
+            workspace: workspace.to_owned(),
+            width,
+            height,
+            font_scale: (font_scale * 10_000.).round() as i64,
+        };
+        self.textures
+            .entry(key.clone())
+            .or_insert_with(|| {
+                generate_info_texture(renderer, &key, scale, font_scale, config).ok()
+            })
+            .clone()
+    }
+
+    fn clear(&mut self) {
+        self.config = None;
+        self.textures.clear();
+    }
+}
+
+fn truncate_title(title: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut truncated: String = title.chars().take(MAX_CHARS).collect();
+    if title.chars().count() > MAX_CHARS {
+        truncated.push('…');
+    }
+    truncated
+}
+
+type CardBlur = (FramebufferEffect, Rectangle<f64, Logical>);
+
 pub struct WindowPickerUi {
     state: WindowPickerState,
     config: Rc<RefCell<Config>>,
@@ -259,6 +636,13 @@ pub struct WindowPickerUi {
     /// When the current hover started, for the zoom-in animation.
     hover_started_at: Option<Duration>,
     glow: RefCell<ShadowRenderElement>,
+    card_shadow: RefCell<ShadowRenderElement>,
+    info_cache: RefCell<InfoCache>,
+    card_blurs: RefCell<HashMap<MappedId, CardBlur>>,
+    card_offscreens: RefCell<HashMap<MappedId, OffscreenBuffer>>,
+    /// Next style to use in `cycle` mode. Advances across picker openings so even a
+    /// single-window picker changes animation each time.
+    motion_cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +663,11 @@ impl WindowPickerUi {
             hover: None,
             hover_started_at: None,
             glow: RefCell::new(ShadowRenderElement::empty()),
+            card_shadow: RefCell::new(ShadowRenderElement::empty()),
+            info_cache: RefCell::new(InfoCache::default()),
+            card_blurs: RefCell::new(HashMap::new()),
+            card_offscreens: RefCell::new(HashMap::new()),
+            motion_cursor: 0,
         }
     }
 
@@ -288,6 +677,13 @@ impl WindowPickerUi {
 
     fn raw_progress(&self) -> f64 {
         self.state.anim().map_or(0., Animation::value).clamp(0., 1.)
+    }
+
+    fn close_from_progress(&self) -> f64 {
+        match &self.state {
+            WindowPickerState::Closing { from_progress, .. } => *from_progress,
+            _ => 0.,
+        }
     }
 
     fn is_closing(&self) -> bool {
@@ -306,12 +702,30 @@ impl WindowPickerUi {
         self.state.session().map(|session| &session.output)
     }
 
-    pub fn open(&mut self, session: WindowPickerSession) {
+    pub fn open(&mut self, mut session: WindowPickerSession) {
         let config = self.config.borrow().window_picker.clone();
+        let style = config.motion.style;
+        let mut motion_cursor = self.motion_cursor;
+        for entry in &mut session.entries {
+            entry.motion = if style == WindowPickerMotionStyle::Cycle {
+                let motion = MOTION_CYCLE[motion_cursor % MOTION_CYCLE.len()];
+                motion_cursor += 1;
+                motion
+            } else {
+                style
+            };
+        }
+        if style == WindowPickerMotionStyle::Cycle {
+            self.motion_cursor = motion_cursor % MOTION_CYCLE.len();
+        }
+
         let anim_cfg = config.animation.to_animation(config.animation_ms_open);
         let anim = Animation::new(session.clock.clone(), 0., 1., 0., anim_cfg);
 
         self.label_cache.get_mut().clear();
+        self.info_cache.get_mut().clear();
+        self.card_blurs.get_mut().clear();
+        self.card_offscreens.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
         self.fly_back = None;
         self.hover = None;
@@ -352,6 +766,7 @@ impl WindowPickerUi {
         self.state = WindowPickerState::Closing {
             session,
             anim: close_anim,
+            from_progress: current,
         };
         self.framebuffer_effect.get_mut().damage();
         true
@@ -368,6 +783,9 @@ impl WindowPickerUi {
 
     fn finish_close(&mut self) {
         self.backdrop_buffers.get_mut().clear();
+        self.card_blurs.get_mut().clear();
+        self.card_offscreens.get_mut().clear();
+        self.info_cache.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
         self.fly_back = None;
     }
@@ -407,6 +825,9 @@ impl WindowPickerUi {
 
     pub fn update_config(&mut self) {
         self.label_cache.get_mut().clear();
+        self.info_cache.get_mut().clear();
+        self.card_blurs.get_mut().clear();
+        self.card_offscreens.get_mut().clear();
         self.framebuffer_effect.get_mut().damage();
     }
 
@@ -420,6 +841,13 @@ impl WindowPickerUi {
         if session.entries.len() == previous_len {
             return false;
         }
+
+        self.card_blurs
+            .get_mut()
+            .retain(|id, _| live_ids.contains(id));
+        self.card_offscreens
+            .get_mut()
+            .retain(|id, _| live_ids.contains(id));
 
         let is_empty = session.entries.is_empty();
         if !is_empty {
@@ -510,7 +938,6 @@ impl WindowPickerUi {
         }
 
         let config = self.config.borrow().window_picker.clone();
-        let progress = self.progress();
         let output_size = output_size(output);
         let scale = output.current_scale().fractional_scale();
         let mut windows = picker_windows(niri, session, &config.label);
@@ -528,17 +955,20 @@ impl WindowPickerUi {
             .iter()
             .zip(layout.placements)
             .find_map(|(window, placement)| {
-                let mut preview = animate_rect(placement.preview, output_size, progress);
-                // Match the zoomed hover feedback so the grown edges stay clickable.
-                if self.hover == Some(window.entry.id) {
-                    let zoom = self.hover_zoom(session);
-                    let center = preview.loc + preview.size.to_point().upscale(0.5);
-                    let zoomed = preview.size.upscale(zoom);
-                    preview = Rectangle::new(center - zoomed.to_point().upscale(0.5), zoomed);
-                }
-                preview
-                    .contains(pos_within_output)
-                    .then_some(window.entry.id)
+                let zoom = if self.hover == Some(window.entry.id) {
+                    self.hover_zoom(session)
+                } else if session.focused_id == Some(window.entry.id) {
+                    HOVER_SCALE
+                } else {
+                    1.
+                };
+                let card = scale_rect(
+                    placement.card,
+                    card_center(placement.card),
+                    zoom,
+                    Point::from((0., 0.)),
+                );
+                card.contains(pos_within_output).then_some(window.entry.id)
             })
     }
 
@@ -551,12 +981,12 @@ impl WindowPickerUi {
             return true;
         }
 
-        // Keep redrawing while a preview is hovered so the glow can pulse and the
+        // Keep redrawing while a preview is hovered or focused so the glow can pulse and the
         // hover zoom can ease in.
         let WindowPickerState::Open { session, .. } = &self.state else {
             return false;
         };
-        if self.hover.is_none() {
+        if self.hover.is_none() && session.focused_id.is_none() {
             return false;
         }
         let config = self.config.borrow().window_picker.clone();
@@ -622,115 +1052,347 @@ impl WindowPickerUi {
             } else {
                 0.
             };
+            let span = 1. - frac * count.saturating_sub(1) as f64;
+            let local_t = |raw: f64, ord: usize| {
+                ((raw - frac * ord as f64) / span.max(f64::EPSILON)).clamp(0., 1.)
+            };
+            let close_from = self.close_from_progress();
 
-            // Subtle breathing of the hover glow; window contents never pulse.
+            // Subtle breathing of focus glow; window contents never pulse.
             let glow_pulse = 0.8 + 0.2 * (session.clock.now().as_secs_f64() * 3.0).sin();
 
             if let Some(layout) = compute_grid(size, &inputs, &config) {
-                let mut glow = self.glow.borrow_mut();
                 for (i, (window, placement)) in windows.iter().zip(layout.placements).enumerate() {
                     let ord = if closing { count - 1 - i } else { i };
-                    let span = 1. - frac * (count.saturating_sub(1)) as f64;
-                    let local_t =
-                        ((raw_progress - frac * ord as f64) / span.max(f64::EPSILON)).clamp(0., 1.);
-                    let eased = if closing {
-                        local_t
-                    } else {
-                        ease_out_cubic(local_t)
-                    };
+                    let style = window.entry.motion;
+                    let open_at = if closing { close_from } else { raw_progress };
+                    let mut tf =
+                        open_transform(style, placement.card, size, local_t(open_at, ord), i);
+
+                    if closing {
+                        let close_t = if close_from > f64::EPSILON {
+                            ((close_from - progress) / close_from).clamp(0., 1.)
+                        } else {
+                            1.
+                        };
+                        let start = open_transform(
+                            style,
+                            placement.card,
+                            size,
+                            local_t(close_from, ord),
+                            i,
+                        );
+                        let scatter = scatter_transform(placement.card, size, close_t, i);
+                        tf.offset = start.offset + (scatter.offset - start.offset).upscale(close_t);
+                        tf.scale = lerp(start.scale, scatter.scale, close_t);
+                        tf.angle = lerp(start.angle, scatter.angle, close_t);
+                        tf.alpha = start.alpha * (1. - close_t);
+                    }
 
                     let hovered = self.hover == Some(window.entry.id);
                     let focused = session.focused_id == Some(window.entry.id);
-
-                    let mut preview = animate_rect(placement.preview, size, eased);
-                    let mut entry_alpha = if session
-                        .prefix
-                        .is_some_and(|prefix| !window.entry.label.starts_with(prefix))
-                    {
-                        PREFIX_DIM_ALPHA * alpha
-                    } else {
-                        alpha * eased.clamp(0., 1.) as f32
-                    };
-
                     let is_fly_back = closing && self.fly_back == Some(window.entry.id);
 
                     if is_fly_back {
-                        // The chosen preview grows toward the viewer while everything fades.
                         let grow = 1. + 0.55 * (1. - progress);
-                        let center = preview.loc + preview.size.to_point().upscale(0.5);
-                        let grown = preview.size.upscale(grow);
-                        preview = Rectangle::new(center - grown.to_point().upscale(0.5), grown);
-                        entry_alpha = ((progress - 0.12) / 0.3).clamp(0., 1.) as f32;
-                    } else if closing {
-                        entry_alpha *= ((progress * 1.6).clamp(0., 1.)) as f32;
-                    } else if hovered {
-                        let zoom = self.hover_zoom(session);
-                        let center = preview.loc + preview.size.to_point().upscale(0.5);
-                        let zoomed = preview.size.upscale(zoom);
-                        preview = Rectangle::new(center - zoomed.to_point().upscale(0.5), zoomed);
+                        tf.offset = Point::from((0., 0.));
+                        tf.scale = grow;
+                        tf.angle = 0.;
+                        tf.alpha = ((progress - 0.12) / 0.3).clamp(0., 1.);
+                    } else if !closing {
+                        let zoom = if hovered {
+                            self.hover_zoom(session)
+                        } else if focused {
+                            HOVER_SCALE
+                        } else {
+                            1.
+                        };
+                        tf.scale *= zoom;
                     }
 
-                    let geo_size = window.mapped.size().to_f64();
-                    let thumb_scale = preview.size.w / geo_size.w.max(f64::EPSILON);
-                    let thumb_radius = thumb_corner_radius(window.mapped);
-
-                    let final_center =
-                        placement.preview.loc + placement.preview.size.to_point().upscale(0.5);
-                    let animated_center = preview.loc + preview.size.to_point().upscale(0.5);
-                    let label_loc = placement.label.loc + (animated_center - final_center);
-                    if let Some(texture) = &window.texture {
-                        let texture = TextureRenderElement::from_texture_buffer(
-                            texture.clone(),
-                            label_loc,
-                            entry_alpha,
-                            None,
-                            Some(placement.label.size),
-                            Kind::Unspecified,
-                        );
-                        push(WindowPickerUiRenderElement::Label(
-                            PrimaryGpuTextureRenderElement(texture),
-                        ));
-                    }
-
-                    render_thumbnail(ctx.r(), scale, window.mapped, preview, entry_alpha, push);
-
-                    // Accent glow behind the preview: strong and gently breathing on
-                    // hover; static and dimmer for the window that had focus on open.
-                    // Pushed after the thumbnail so it stays behind it, spilling past
-                    // the edges.
-                    let glow_style = if closing || !selection.glow {
-                        None
-                    } else if hovered {
-                        Some((selection.hover_color, alpha * glow_pulse as f32 * 0.9))
-                    } else if focused {
-                        Some((selection.focused_color, entry_alpha * 0.55))
+                    let prefix_dim = session
+                        .prefix
+                        .is_some_and(|prefix| !window.entry.label.starts_with(prefix));
+                    let mut entry_alpha = if prefix_dim {
+                        PREFIX_DIM_ALPHA * alpha
                     } else {
-                        None
+                        alpha * tf.alpha.clamp(0., 1.) as f32
                     };
-                    if let Some((color, glow_alpha)) = glow_style {
-                        let margin = (GLOW_SIGMA * 3.).ceil();
-                        let shader_size = preview.size + Size::from((margin, margin)).upscale(2.);
-                        glow.update(
-                            shader_size,
-                            Rectangle::new(Point::from((margin, margin)), preview.size),
-                            color,
-                            GLOW_SIGMA as f32,
-                            thumb_radius.scaled_by(thumb_scale as f32).expanded_by(4.),
-                            scale as f32,
-                            Rectangle::zero(),
-                            CornerRadius::default(),
-                            glow_alpha,
+                    if is_fly_back {
+                        entry_alpha = ((progress - 0.12) / 0.3).clamp(0., 1.) as f32;
+                    }
+
+                    let rotated = tf.angle.abs() > 1e-4;
+                    if rotated {
+                        // Rotation needs one composite texture per card so the window
+                        // thumbnail, keycap and info strip rotate as one unit.
+                        let mut gctx = ctx.as_gles();
+                        let mut elems = Vec::new();
+                        self.render_card_contents(
+                            gctx.r(),
+                            scale,
+                            window,
+                            &placement,
+                            CardTransform::identity(),
+                            1.,
+                            &config,
+                            &mut |elem| elems.push(elem),
                         );
-                        push(WindowPickerUiRenderElement::Shadow(
-                            glow.clone()
-                                .with_location(preview.loc - Point::from((margin, margin))),
-                        ));
+                        let rendered = self
+                            .card_offscreens
+                            .borrow_mut()
+                            .entry(window.entry.id)
+                            .or_default()
+                            .render(gctx.renderer, Scale::from(scale), &elems);
+                        let Ok((elem, _sync, _data)) = rendered else {
+                            continue;
+                        };
+                        let texture = elem.texture().clone();
+                        let tex_rect = Rectangle::new(elem.offset(), elem.logical_size());
+                        if tex_rect.size.w <= 0. || tex_rect.size.h <= 0. {
+                            continue;
+                        }
+
+                        let pivot = card_center(placement.card) - tex_rect.loc;
+                        let (dest_size, dest_center) =
+                            rotated_bounds(tex_rect.size, pivot, tf.angle, tf.scale);
+                        if dest_size.w <= 0. || dest_size.h <= 0. {
+                            continue;
+                        }
+                        let dest_loc = card_center(placement.card) + tf.offset + dest_center
+                            - dest_size.to_point().upscale(0.5);
+
+                        let uniforms = Rc::new([
+                            Uniform::new(
+                                "src_size",
+                                [tex_rect.size.w as f32, tex_rect.size.h as f32],
+                            ),
+                            Uniform::new("dest_size", [dest_size.w as f32, dest_size.h as f32]),
+                            Uniform::new(
+                                "src_center",
+                                [
+                                    (tex_rect.size.w * 0.5) as f32,
+                                    (tex_rect.size.h * 0.5) as f32,
+                                ],
+                            ),
+                            Uniform::new("angle", tf.angle as f32),
+                            Uniform::new("card_scale", tf.scale as f32),
+                        ]);
+                        let textures = HashMap::from([(String::from("tex"), texture)]);
+                        let card = ShaderRenderElement::new(
+                            ProgramType::PickerCard,
+                            dest_size,
+                            None,
+                            scale as f32,
+                            entry_alpha,
+                            uniforms,
+                            textures,
+                            Kind::Unspecified,
+                        )
+                        .with_location(dest_loc);
+                        push(WindowPickerUiRenderElement::Card(card));
+                    } else {
+                        self.render_card_contents(
+                            ctx.r(),
+                            scale,
+                            window,
+                            &placement,
+                            tf,
+                            entry_alpha,
+                            &config,
+                            push,
+                        );
+                    }
+
+                    // Glow and per-card blur sit behind the rotated card texture.
+                    if !closing && selection.glow && tf.angle.abs() < 1e-4 {
+                        let glow_style = if hovered {
+                            Some((selection.hover_color, entry_alpha * glow_pulse as f32 * 0.9))
+                        } else if focused {
+                            Some((
+                                selection.focused_color,
+                                entry_alpha * glow_pulse as f32 * 0.55,
+                            ))
+                        } else {
+                            None
+                        };
+                        if let Some((color, glow_alpha)) = glow_style {
+                            let card_rect = scale_rect(
+                                placement.card,
+                                card_center(placement.card),
+                                tf.scale,
+                                tf.offset,
+                            );
+                            let margin = (GLOW_SIGMA * 3.).ceil();
+                            let shader_size =
+                                card_rect.size + Size::from((margin, margin)).upscale(2.);
+                            let radius = CornerRadius::from(
+                                config.card.corner_radius.max(0.) as f32 * tf.scale as f32,
+                            );
+                            let mut glow = self.glow.borrow_mut();
+                            glow.update(
+                                shader_size,
+                                Rectangle::new(Point::from((margin, margin)), card_rect.size),
+                                color,
+                                GLOW_SIGMA as f32,
+                                radius,
+                                scale as f32,
+                                Rectangle::zero(),
+                                CornerRadius::default(),
+                                glow_alpha,
+                            );
+                            push(WindowPickerUiRenderElement::Shadow(
+                                glow.clone()
+                                    .with_location(card_rect.loc - Point::from((margin, margin))),
+                            ));
+                        }
+                    }
+
+                    // With no card fill color, the per-card blur is the card surface itself.
+                    // It can follow any axis-aligned transform; rotation needs the composite.
+                    let blur_ok = !closing && tf.angle.abs() < 1e-4;
+                    if config.card.on && config.card.blur.on && blur_ok {
+                        let card_rect = scale_rect(
+                            placement.card,
+                            card_center(placement.card),
+                            tf.scale,
+                            tf.offset,
+                        );
+                        let radius = CornerRadius::from(
+                            config.card.corner_radius.max(0.) as f32 * tf.scale as f32,
+                        );
+                        let mut blurs = self.card_blurs.borrow_mut();
+                        let (effect, last_rect) = blurs
+                            .entry(window.entry.id)
+                            .or_insert_with(|| (FramebufferEffect::new(), Rectangle::default()));
+                        if *last_rect != card_rect {
+                            effect.damage();
+                            *last_rect = card_rect;
+                        }
+                        let params = RenderParams {
+                            geometry: card_rect,
+                            subregion: None,
+                            clip: Some((card_rect, radius)),
+                            scale,
+                        };
+                        let blur = BlurOptions {
+                            passes: config.card.blur.passes,
+                            offset: config.card.blur.offset.round(),
+                        };
+                        let effect = effect.render(None, params, Some(blur), 0., 1., None);
+                        push(WindowPickerUiRenderElement::FramebufferEffect(effect));
                     }
                 }
             }
         }
 
         self.render_backdrop(output, size, progress, closing, &config, push);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_card_contents<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        scale: f64,
+        window: &RenderedWindow<'_>,
+        placement: &Placement,
+        transform: CardTransform,
+        entry_alpha: f32,
+        config: &niri_config::WindowPicker,
+        push: &mut dyn FnMut(WindowPickerUiRenderElement<R>),
+    ) {
+        let pivot = card_center(placement.card);
+        let card = scale_rect(placement.card, pivot, transform.scale, transform.offset);
+        let preview = scale_rect(placement.preview, pivot, transform.scale, transform.offset);
+        let info = scale_rect(placement.info, pivot, transform.scale, transform.offset);
+        let label = scale_rect(placement.label, pivot, transform.scale, transform.offset);
+        let card_radius = config.card.corner_radius.max(0.) as f32 * transform.scale as f32;
+
+        if let Some(texture) = &window.texture {
+            let texture = TextureRenderElement::from_texture_buffer(
+                texture.clone(),
+                label.loc,
+                entry_alpha,
+                None,
+                Some(label.size),
+                Kind::Unspecified,
+            );
+            push(WindowPickerUiRenderElement::Label(
+                PrimaryGpuTextureRenderElement(texture),
+            ));
+        }
+
+        if config.card.on {
+            let app_id = window.entry.app_id.as_deref().unwrap_or("unknown");
+            let title = window
+                .entry
+                .title
+                .as_deref()
+                .filter(|title| !title.is_empty())
+                .unwrap_or(app_id);
+            let gctx = ctx.as_gles();
+            let info_texture = self.info_cache.borrow_mut().get(
+                gctx.renderer,
+                app_id,
+                title,
+                &window.entry.workspace,
+                placement.info.size.w,
+                placement.info.size.h,
+                placement.info_scale,
+                scale,
+                &config.card.info,
+            );
+            if let Some(texture) = info_texture {
+                let texture = TextureRenderElement::from_texture_buffer(
+                    texture,
+                    info.loc,
+                    entry_alpha,
+                    None,
+                    Some(info.size),
+                    Kind::Unspecified,
+                );
+                push(WindowPickerUiRenderElement::Label(
+                    PrimaryGpuTextureRenderElement(texture),
+                ));
+            }
+        }
+
+        let mut ctx = ctx;
+        render_thumbnail(
+            ctx.r(),
+            scale,
+            window.mapped,
+            preview,
+            entry_alpha,
+            thumbnail_clip_radius(window.mapped, config),
+            push,
+        );
+
+        if config.card.on {
+            let radius = CornerRadius::from(card_radius);
+
+            if config.card.shadow {
+                let margin = (GLOW_SIGMA * 2.).ceil();
+                let shader_size = card.size + Size::from((margin, margin)).upscale(2.);
+                let mut shadow = self.card_shadow.borrow_mut();
+                shadow.update(
+                    shader_size,
+                    Rectangle::new(Point::from((margin, margin)), card.size),
+                    Color::from_rgba8_unpremul(0, 0, 0, 255),
+                    12. * transform.scale as f32,
+                    radius,
+                    scale as f32,
+                    Rectangle::new(Point::from((margin, margin)), card.size),
+                    radius,
+                    0.35,
+                );
+                push(WindowPickerUiRenderElement::Shadow(
+                    shadow
+                        .clone()
+                        .with_location(card.loc - Point::from((margin, margin))),
+                ));
+            }
+        }
     }
 
     fn render_backdrop<R: NiriRenderer>(
@@ -874,16 +1536,30 @@ fn thumb_corner_radius(mapped: &Mapped) -> CornerRadius {
     }
 }
 
+fn thumbnail_clip_radius(mapped: &Mapped, config: &niri_config::WindowPicker) -> CornerRadius {
+    if config.card.on {
+        let radius = config.card.corner_radius.max(0.) as f32;
+        CornerRadius {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: 0.,
+            bottom_left: 0.,
+        }
+    } else {
+        thumb_corner_radius(mapped)
+    }
+}
+
 fn render_thumbnail<R: NiriRenderer>(
     mut ctx: RenderCtx<R>,
     output_scale: f64,
     mapped: &Mapped,
     preview: Rectangle<f64, Logical>,
     alpha: f32,
+    radius: CornerRadius,
     push: &mut dyn FnMut(WindowPickerUiRenderElement<R>),
 ) {
     let geo = Rectangle::from_size(mapped.size().to_f64());
-    let radius = thumb_corner_radius(mapped);
 
     let scale = Scale::from(output_scale);
     let clip_shader = ClippedSurfaceRenderElement::shader(ctx.renderer).cloned();
@@ -916,40 +1592,6 @@ fn render_thumbnail<R: NiriRenderer>(
     });
 }
 
-fn animate_rect(
-    rect: Rectangle<f64, Logical>,
-    output: Size<f64, Logical>,
-    progress: f64,
-) -> Rectangle<f64, Logical> {
-    let output_center = output.to_point().upscale(0.5);
-    let target_center = rect.loc + rect.size.to_point().upscale(0.5);
-    let mut direction = target_center - output_center;
-    if direction.x.abs() < f64::EPSILON && direction.y.abs() < f64::EPSILON {
-        direction.y = -1.;
-    }
-
-    let x_factor = if direction.x < 0. {
-        (-rect.size.w / 2. - output_center.x) / direction.x
-    } else if direction.x > 0. {
-        (output.w + rect.size.w / 2. - output_center.x) / direction.x
-    } else {
-        f64::INFINITY
-    };
-    let y_factor = if direction.y < 0. {
-        (-rect.size.h / 2. - output_center.y) / direction.y
-    } else if direction.y > 0. {
-        (output.h + rect.size.h / 2. - output_center.y) / direction.y
-    } else {
-        f64::INFINITY
-    };
-    let entry_center = output_center + direction.upscale(x_factor.min(y_factor));
-    let center = entry_center + (target_center - entry_center).upscale(progress);
-
-    let scale = 0.9 + progress * 0.1;
-    let size = rect.size.upscale(scale);
-    Rectangle::new(center - size.to_point().upscale(0.5), size)
-}
-
 #[derive(Debug, Clone, Copy)]
 struct GridInput {
     window_size: Size<f64, Logical>,
@@ -958,8 +1600,11 @@ struct GridInput {
 
 #[derive(Debug, Clone, Copy)]
 struct Placement {
+    card: Rectangle<f64, Logical>,
     preview: Rectangle<f64, Logical>,
     label: Rectangle<f64, Logical>,
+    info: Rectangle<f64, Logical>,
+    info_scale: f64,
 }
 
 #[derive(Debug)]
@@ -971,7 +1616,7 @@ struct GridLayout {
 struct GridMetrics {
     col_widths: Vec<f64>,
     row_label_heights: Vec<f64>,
-    row_window_heights: Vec<f64>,
+    row_card_heights: Vec<f64>,
     size: Size<f64, Logical>,
 }
 
@@ -1000,6 +1645,11 @@ fn compute_grid(
     let chrome_scale = (52. / count as f64).sqrt().clamp(0.2, 1.);
     let gap = config.gap.max(0.) * chrome_scale;
     let label_gap = config.label.gap.max(0.) * chrome_scale;
+    let info_height = if config.card.on {
+        config.card.info.height.max(0.) * chrome_scale
+    } else {
+        0.
+    };
     let max_scale = config.max_scale.clamp(0.001, 1.);
     let aspect = (area.w / area.h).max(0.01);
     let max_cols = ((count as f64 * aspect).sqrt() * 2. + 2.).ceil() as usize;
@@ -1008,7 +1658,15 @@ fn compute_grid(
     let mut best: Option<(usize, f64, f64, GridMetrics)> = None;
     for cols in 1..=max_cols {
         let fits = |window_scale| {
-            let metrics = grid_metrics(inputs, cols, window_scale, chrome_scale, gap, label_gap);
+            let metrics = grid_metrics(
+                inputs,
+                cols,
+                window_scale,
+                chrome_scale,
+                gap,
+                label_gap,
+                info_height,
+            );
             (
                 metrics.size.w <= area.w && metrics.size.h <= area.h,
                 metrics,
@@ -1059,11 +1717,11 @@ fn compute_grid(
         x += width + gap;
     }
 
-    let mut row_y = Vec::with_capacity(metrics.row_window_heights.len());
+    let mut row_y = Vec::with_capacity(metrics.row_card_heights.len());
     let mut y = origin.y;
-    for row in 0..metrics.row_window_heights.len() {
+    for row in 0..metrics.row_card_heights.len() {
         row_y.push(y);
-        y += metrics.row_label_heights[row] + label_gap + metrics.row_window_heights[row] + gap;
+        y += metrics.row_label_heights[row] + label_gap + metrics.row_card_heights[row] + gap;
     }
 
     let mut placements = Vec::with_capacity(inputs.len());
@@ -1071,21 +1729,28 @@ fn compute_grid(
         let col = idx % cols;
         let row = idx / cols;
         let preview_size = input.window_size.upscale(window_scale);
-        let preview_loc = Point::new(
-            col_x[col] + (metrics.col_widths[col] - preview_size.w) / 2.,
-            row_y[row]
-                + metrics.row_label_heights[row]
-                + label_gap
-                + (metrics.row_window_heights[row] - preview_size.h) / 2.,
+        let card_size = Size::from((preview_size.w, preview_size.h + info_height));
+        let card_loc = Point::new(
+            col_x[col] + (metrics.col_widths[col] - card_size.w) / 2.,
+            row_y[row] + metrics.row_label_heights[row] + label_gap,
+        );
+        let card = Rectangle::new(card_loc, card_size);
+        let preview = Rectangle::new(card_loc, preview_size);
+        let info = Rectangle::new(
+            card_loc + Point::from((0., preview_size.h)),
+            Size::from((preview_size.w, info_height)),
         );
         let label_size = input.label_size.upscale(chrome_scale);
-        // Anchor the keycap to its window by overlapping the preview's top edge.
+        // Anchor the keycap to the card's top edge: one third sits inside the card.
         let label_loc = Point::new(
-            preview_loc.x + (preview_size.w - label_size.w) / 2.,
-            preview_loc.y - label_size.h * (1. - LABEL_OVERLAP),
+            card.loc.x + (card.size.w - label_size.w) / 2.,
+            card.loc.y - label_size.h * (1. - LABEL_OVERLAP),
         );
         placements.push(Placement {
-            preview: Rectangle::new(preview_loc, preview_size),
+            card,
+            preview,
+            info,
+            info_scale: chrome_scale,
             label: Rectangle::new(label_loc, label_size),
         });
     }
@@ -1100,6 +1765,11 @@ fn compute_single_window(
     config: &niri_config::WindowPicker,
 ) -> Option<GridLayout> {
     let label_gap = config.label.gap.max(0.);
+    let info_height = if config.card.on {
+        config.card.info.height.max(0.)
+    } else {
+        0.
+    };
     let available_height = area.h - 2. * (input.label_size.h + label_gap);
     if available_height <= 0. || input.window_size.w <= 0. || input.window_size.h <= 0. {
         return None;
@@ -1109,20 +1779,26 @@ fn compute_single_window(
         .max_scale
         .clamp(0.001, 1.)
         .min(area.w / input.window_size.w)
-        .min(available_height / input.window_size.h);
+        .min(available_height / (input.window_size.h + info_height));
     let preview_size = input.window_size.upscale(scale);
-    let preview_loc = Point::new(
-        (output.w - preview_size.w) / 2.,
-        (output.h - preview_size.h) / 2.,
+    let card_size = Size::from((preview_size.w, preview_size.h + info_height));
+    let card_loc = Point::new((output.w - card_size.w) / 2., (output.h - card_size.h) / 2.);
+    let preview = Rectangle::new(card_loc, preview_size);
+    let info = Rectangle::new(
+        card_loc + Point::from((0., preview_size.h)),
+        Size::from((preview_size.w, info_height)),
     );
     let label_loc = Point::new(
-        preview_loc.x + (preview_size.w - input.label_size.w) / 2.,
-        preview_loc.y - input.label_size.h * (1. - LABEL_OVERLAP),
+        card_loc.x + (card_size.w - input.label_size.w) / 2.,
+        card_loc.y - input.label_size.h * (1. - LABEL_OVERLAP),
     );
 
     Some(GridLayout {
         placements: vec![Placement {
-            preview: Rectangle::new(preview_loc, preview_size),
+            card: Rectangle::new(card_loc, card_size),
+            preview,
+            info,
+            info_scale: 1.,
             label: Rectangle::new(label_loc, input.label_size),
         }],
     })
@@ -1135,11 +1811,12 @@ fn grid_metrics(
     chrome_scale: f64,
     gap: f64,
     label_gap: f64,
+    info_height: f64,
 ) -> GridMetrics {
     let rows = inputs.len().div_ceil(cols);
     let mut col_widths = vec![0_f64; cols];
     let mut row_label_heights = vec![0_f64; rows];
-    let mut row_window_heights = vec![0_f64; rows];
+    let mut row_card_heights = vec![0_f64; rows];
 
     for (idx, input) in inputs.iter().enumerate() {
         let col = idx % cols;
@@ -1147,37 +1824,77 @@ fn grid_metrics(
         col_widths[col] = col_widths[col]
             .max((input.window_size.w * window_scale).max(input.label_size.w * chrome_scale));
         row_label_heights[row] = row_label_heights[row].max(input.label_size.h * chrome_scale);
-        row_window_heights[row] = row_window_heights[row].max(input.window_size.h * window_scale);
+        row_card_heights[row] =
+            row_card_heights[row].max(input.window_size.h * window_scale + info_height);
     }
 
     let width = col_widths.iter().sum::<f64>() + gap * cols.saturating_sub(1) as f64;
     let height = row_label_heights.iter().sum::<f64>()
-        + row_window_heights.iter().sum::<f64>()
+        + row_card_heights.iter().sum::<f64>()
         + label_gap * rows as f64
         + gap * rows.saturating_sub(1) as f64;
 
     GridMetrics {
         col_widths,
         row_label_heights,
-        row_window_heights,
+        row_card_heights,
         size: Size::from((width, height)),
     }
 }
 
-fn make_labels(count: usize) -> Vec<String> {
-    if count <= 26 {
-        return (0..count)
-            .map(|idx| char::from(b'A' + idx as u8).to_string())
+fn make_labels(count: usize, configured_letters: &str) -> Vec<String> {
+    let mut custom = Vec::new();
+    for letter in configured_letters.chars() {
+        if letter.is_ascii_alphabetic() {
+            let letter = letter.to_ascii_uppercase();
+            if !custom.contains(&letter) {
+                custom.push(letter);
+            }
+        }
+    }
+
+    if custom.is_empty() {
+        if count <= 26 {
+            return (0..count)
+                .map(|idx| char::from(b'A' + idx as u8).to_string())
+                .collect();
+        }
+
+        return (0..count.min(MAX_WINDOWS))
+            .map(|idx| {
+                let first = char::from(b'A' + (idx / 26) as u8);
+                let second = char::from(b'A' + (idx % 26) as u8);
+                format!("{first}{second}")
+            })
             .collect();
     }
 
-    (0..count.min(MAX_WINDOWS))
-        .map(|idx| {
-            let first = char::from(b'A' + (idx / 26) as u8);
-            let second = char::from(b'A' + (idx % 26) as u8);
-            format!("{first}{second}")
-        })
-        .collect()
+    if count <= custom.len() {
+        return custom
+            .into_iter()
+            .take(count)
+            .map(|letter| letter.to_string())
+            .collect();
+    }
+
+    // The configured single letters cannot cover all windows. Switch every label
+    // to a random two-letter combination so all labels keep the same input length.
+    let mut pool = custom;
+    if pool.len() * pool.len() < count {
+        for letter in 'A'..='Z' {
+            if !pool.contains(&letter) {
+                pool.push(letter);
+            }
+        }
+    }
+
+    let mut labels: Vec<String> = pool
+        .iter()
+        .flat_map(|first| pool.iter().map(move |second| format!("{first}{second}")))
+        .collect();
+    fastrand::shuffle(&mut labels);
+    labels.truncate(count.min(MAX_WINDOWS));
+    labels
 }
 
 fn letter_from_keysym(keysym: Keysym) -> Option<char> {
@@ -1216,6 +1933,93 @@ fn hex(color: Color) -> String {
         channel(color.g),
         channel(color.b)
     )
+}
+
+fn generate_info_texture(
+    renderer: &mut GlesRenderer,
+    key: &InfoKey,
+    scale: f64,
+    font_scale: f64,
+    config: &WindowPickerInfo,
+) -> anyhow::Result<PickerTexture> {
+    let _span = tracy_client::span!("window_picker::generate_info_texture");
+
+    let width = key.width.max(1);
+    let height = key.height.max(1);
+    let surface = ImageSurface::create(cairo::Format::ARgb32, width, height)?;
+    let cr = cairo::Context::new(&surface)?;
+    cr.set_operator(cairo::Operator::Source);
+    cr.set_source_rgba(0., 0., 0., 0.);
+    cr.paint()?;
+    cr.set_operator(cairo::Operator::Over);
+
+    let padding_x = config.padding_x * scale * font_scale;
+    let padding_y = config.padding_y * scale * font_scale;
+    let gap = 8. * scale * font_scale;
+
+    let make_font = |size: f64| {
+        let mut font = FontDescription::from_string(&config.font);
+        font.set_absolute_size(size * scale * font_scale * f64::from(pango::SCALE));
+        font
+    };
+
+    let workspace_font = make_font(config.workspace_size);
+    let workspace_layout = pangocairo::functions::create_layout(&cr);
+    workspace_layout.context().set_round_glyph_positions(false);
+    workspace_layout.set_single_paragraph_mode(true);
+    workspace_layout.set_font_description(Some(&workspace_font));
+    workspace_layout.set_text(&key.workspace);
+    let (workspace_w, _) = workspace_layout.pixel_size();
+    let chip_w = workspace_w as f64;
+    let chip_x = (width as f64 - padding_x - chip_w).max(padding_x);
+    let chip_y = padding_y;
+    cr.move_to(chip_x, chip_y);
+    set_source_color(&cr, config.workspace_color);
+    pangocairo::functions::show_layout(&cr, &workspace_layout);
+
+    let title_font = make_font(config.title_size);
+    let title_layout = pangocairo::functions::create_layout(&cr);
+    title_layout.context().set_round_glyph_positions(false);
+    title_layout.set_single_paragraph_mode(true);
+    title_layout.set_font_description(Some(&title_font));
+    title_layout.set_text(&key.title);
+    title_layout.set_ellipsize(pango::EllipsizeMode::End);
+    let title_width = (width as f64 - padding_x * 2. - chip_w - gap).max(1.);
+    title_layout.set_width((title_width * f64::from(pango::SCALE)) as i32);
+    cr.move_to(padding_x, padding_y);
+    set_source_color(&cr, config.title_color);
+    pangocairo::functions::show_layout(&cr, &title_layout);
+
+    // The app id is independent of the title/workspace padding: centered across
+    // the whole card, with a fixed 5 logical pixels above the card bottom.
+    let app_font = make_font(config.app_id_size);
+    let app_layout = pangocairo::functions::create_layout(&cr);
+    app_layout.context().set_round_glyph_positions(false);
+    app_layout.set_single_paragraph_mode(true);
+    app_layout.set_font_description(Some(&app_font));
+    app_layout.set_text(&key.app_id);
+    app_layout.set_ellipsize(pango::EllipsizeMode::End);
+    app_layout.set_alignment(pango::Alignment::Center);
+    app_layout.set_width((width as f64 * f64::from(pango::SCALE)) as i32);
+    let (_, app_h) = app_layout.pixel_size();
+    let bottom_padding = 5. * scale;
+    cr.move_to(0., (height as f64 - bottom_padding - app_h as f64).max(0.));
+    set_source_color(&cr, config.app_id_color);
+    pangocairo::functions::show_layout(&cr, &app_layout);
+
+    drop(cr);
+    let data = surface.take_data().unwrap();
+    let buffer = TextureBuffer::from_memory(
+        renderer,
+        &data,
+        Fourcc::Argb8888,
+        (width, height),
+        false,
+        scale,
+        Transform::Normal,
+        Vec::new(),
+    )?;
+    Ok(buffer)
 }
 
 fn generate_label_texture(
@@ -1279,10 +2083,10 @@ fn generate_label_texture(
     // The darker bottom strip faking key travel.
     let key_depth = (scale * 2.).min(panel_height / 4.);
 
-    // Keycap faces swap roles when highlighted: the accent color becomes the key and
-    // the dark panel color becomes the text.
+    // The highlighted state only changes the keycap face; the letter keeps the
+    // configured text color so the label remains readable and consistent.
     let (face, text) = if style.highlighted {
-        (accent, config.background_color)
+        (accent, config.text_color)
     } else {
         (config.background_color, config.text_color)
     };
@@ -1397,12 +2201,19 @@ mod tests {
 
     #[test]
     fn label_scheme_switches_to_uniform_pairs() {
-        assert_eq!(make_labels(3), ["A", "B", "C"]);
-        let labels = make_labels(28);
+        assert_eq!(make_labels(3, ""), ["A", "B", "C"]);
+        let labels = make_labels(28, "");
         assert_eq!(labels[0], "AA");
         assert_eq!(labels[25], "AZ");
         assert_eq!(labels[26], "BA");
         assert_eq!(labels[27], "BB");
+
+        assert_eq!(make_labels(3, "qwe"), ["Q", "W", "E"]);
+        let labels = make_labels(10, "abc");
+        assert_eq!(labels.len(), 10);
+        assert!(labels.iter().all(|label| label.len() == 2));
+        let unique: HashSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len());
     }
 
     #[test]
@@ -1429,7 +2240,7 @@ mod tests {
     }
 
     #[test]
-    fn single_window_preview_is_exactly_centered() {
+    fn single_window_card_is_exactly_centered() {
         let config = niri_config::WindowPicker::default();
         let output = Size::from((1920., 1080.));
         let input = GridInput {
@@ -1437,7 +2248,7 @@ mod tests {
             label_size: Size::from((60., 44.)),
         };
         let placement = compute_grid(output, &[input], &config).unwrap().placements[0];
-        let center = placement.preview.loc + placement.preview.size.to_point().upscale(0.5);
+        let center = placement.card.loc + placement.card.size.to_point().upscale(0.5);
 
         assert_eq!(center, output.to_point().upscale(0.5));
     }

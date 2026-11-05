@@ -13,6 +13,7 @@ use crate::render_helpers::blur::BlurProgram;
 pub struct Shaders {
     pub border: Option<ShaderProgram>,
     pub shadow: Option<ShaderProgram>,
+    pub picker_card: Option<ShaderProgram>,
     pub clipped_surface: Option<GlesTexProgram>,
     pub postprocess_and_clip: Option<GlesTexProgram>,
     pub resize: Option<ShaderProgram>,
@@ -27,6 +28,7 @@ pub struct Shaders {
 pub enum ProgramType {
     Border,
     Shadow,
+    PickerCard,
     Resize,
     Close,
     Open,
@@ -82,6 +84,23 @@ impl Shaders {
         )
         .map_err(|err| {
             warn!("error compiling shadow shader: {err:?}");
+        })
+        .ok();
+
+        let picker_card = ShaderProgram::compile(
+            renderer,
+            include_str!("picker_card.frag"),
+            &[
+                UniformName::new("src_size", UniformType::_2f),
+                UniformName::new("dest_size", UniformType::_2f),
+                UniformName::new("src_center", UniformType::_2f),
+                UniformName::new("angle", UniformType::_1f),
+                UniformName::new("card_scale", UniformType::_1f),
+            ],
+            &["tex"],
+        )
+        .map_err(|err| {
+            warn!("error compiling picker card shader: {err:?}");
         })
         .ok();
 
@@ -183,6 +202,7 @@ impl Shaders {
         Self {
             border,
             shadow,
+            picker_card,
             clipped_surface,
             postprocess_and_clip,
             resize,
@@ -232,6 +252,7 @@ impl Shaders {
         match program {
             ProgramType::Border => self.border.clone(),
             ProgramType::Shadow => self.shadow.clone(),
+            ProgramType::PickerCard => self.picker_card.clone(),
             ProgramType::Resize => self
                 .custom_resize
                 .borrow()

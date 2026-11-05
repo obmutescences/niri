@@ -4890,7 +4890,7 @@ impl<W: LayoutElement> Layout<W> {
             });
     }
 
-    pub fn refresh(&mut self, is_active: bool) {
+    pub fn refresh(&mut self, is_active: bool, layout_has_keyboard_focus: bool) {
         let _span = tracy_client::span!("Layout::refresh");
 
         self.is_active = is_active;
@@ -4944,7 +4944,7 @@ impl<W: LayoutElement> Layout<W> {
 
                     for (ws_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                         let is_focused = is_active && ws_idx == mon.active_workspace_idx;
-                        ws.refresh(is_active, is_focused);
+                        ws.refresh(is_active, is_focused, layout_has_keyboard_focus);
 
                         if let Some(is_scrolling) = ongoing_scrolling_dnd {
                             // Lock or unlock the view for scrolling interactive move.
@@ -4964,7 +4964,7 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
-                    ws.refresh(false, false);
+                    ws.refresh(false, false, layout_has_keyboard_focus);
                     ws.view_offset_gesture_end(None);
                 }
             }

@@ -43,6 +43,7 @@ pub mod recent_windows;
 pub mod sounds;
 pub mod utils;
 pub mod window_picker;
+pub mod window_picker_card;
 pub mod window_rule;
 pub mod workspace;
 
@@ -63,6 +64,9 @@ pub use crate::sounds::Sounds;
 pub use crate::utils::FloatOrInt;
 use crate::utils::{expand_home_path, Flag, MergeWith as _};
 pub use crate::window_picker::{WindowPicker, WindowPickerLabel};
+pub use crate::window_picker_card::{
+    WindowPickerCard, WindowPickerInfo, WindowPickerMotion, WindowPickerMotionStyle,
+};
 pub use crate::window_rule::{
     FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
 };
@@ -3086,6 +3090,7 @@ mod tests {
                     padding_y: 7.0,
                     gap: 12.0,
                     corner_radius: 8.0,
+                    letters: "",
                 },
                 backdrop: WindowPickerBackdrop {
                     brightness: 0.55,
@@ -3109,13 +3114,59 @@ mod tests {
                     kind: None,
                 },
                 selection: WindowPickerSelection {
-                    color: Color {
+                    focused_color: Color {
                         r: 0.4509804,
                         g: 0.85490197,
                         b: 0.7921569,
-                        a: 0.43137255,
+                        a: 1.0,
                     },
-                    width: 26.0,
+                    hover_color: Color {
+                        r: 0.4509804,
+                        g: 0.85490197,
+                        b: 0.7921569,
+                        a: 1.0,
+                    },
+                    glow: true,
+                },
+                card: WindowPickerCard {
+                    on: true,
+                    corner_radius: 14.0,
+                    shadow: true,
+                    info: WindowPickerInfo {
+                        font: "Sans",
+                        title_size: 13.5,
+                        app_id_size: 10.0,
+                        workspace_size: 9.5,
+                        title_color: Color {
+                            r: 0.9647059,
+                            g: 0.9843137,
+                            b: 0.9882353,
+                            a: 1.0,
+                        },
+                        app_id_color: Color {
+                            r: 0.8392157,
+                            g: 0.9098039,
+                            b: 0.93333334,
+                            a: 0.5882353,
+                        },
+                        workspace_color: Color {
+                            r: 0.9098039,
+                            g: 0.96862745,
+                            b: 0.9764706,
+                            a: 0.78431374,
+                        },
+                        padding_x: 12.0,
+                        padding_y: 9.0,
+                        height: 58.0,
+                    },
+                    blur: WindowPickerBlur {
+                        on: true,
+                        passes: 2,
+                        offset: 2.0,
+                    },
+                },
+                motion: WindowPickerMotion {
+                    style: Slide,
                 },
             },
             sounds: Sounds {

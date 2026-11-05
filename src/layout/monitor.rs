@@ -537,7 +537,6 @@ impl<W: LayoutElement> Monitor<W> {
         self.bounce = Some(WorkspaceBounce { anim, dir });
     }
 
-
     /// Current rubber-band Y offset for the view (0 outside of a bounce).
     fn workspace_bounce_offset_y(&self) -> f64 {
         const AMPLITUDE: f64 = 26.;
@@ -1543,7 +1542,9 @@ impl<W: LayoutElement> Monitor<W> {
     /// Returns `(shrink, expand)` animation configs for the independent dip mode.
     ///
     /// For easing animations, the configured duration is split between the two phases.
-    fn workspace_dip_anim_configs(&self) -> Option<(niri_config::Animation, niri_config::Animation)> {
+    fn workspace_dip_anim_configs(
+        &self,
+    ) -> Option<(niri_config::Animation, niri_config::Animation)> {
         let anim = self.options.layout.workspace_dip.anim?;
         use niri_config::animations::Kind as ConfigKind;
         let configs = match anim.kind {
@@ -1740,8 +1741,8 @@ impl<W: LayoutElement> Monitor<W> {
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap
-            + self.workspace_bounce_offset_y();
+        let first_ws_y =
+            -self.workspace_render_idx() * ws_height_with_gap + self.workspace_bounce_offset_y();
         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
@@ -2022,9 +2023,7 @@ impl<W: LayoutElement> Monitor<W> {
                             let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
                             if let Some(elem) = elem {
                                 let elem = MonitorInnerRenderElement::from(elem);
-                                let depth = self
-                                    .workspace_3d_scale(geo)
-                                    .unwrap_or(Scale::from(1.));
+                                let depth = self.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
                                 push(scale_relocate(geo, depth, elem));
                             }
                         }

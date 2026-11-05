@@ -85,7 +85,6 @@ impl MergeWith<LayoutPart> for Layout {
             gaps,
         );
 
-
         if let Some(focus_scale) = &part.focus_scale {
             self.focus_animation.scale.merge_with(focus_scale);
         }

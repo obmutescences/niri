@@ -52,7 +52,7 @@ binds {
 }
 ```
 
-The picker is configurable under `window-picker`, including grid size, preview scaling, label styling, and the backdrop treatment:
+The picker is configurable under `window-picker`, including grid size, preview scaling, label styling, cards, entry animations, and the backdrop treatment:
 
 ```kdl
 window-picker {
@@ -65,6 +65,38 @@ window-picker {
         font "sans-serif"
         size 14
         corner-radius 8
+        // Optional custom alphabet; if too short for all windows,
+        // labels switch to random two-letter combinations.
+        // letters "ASDFGHJKL"
+    }
+
+    card {
+        corner-radius 14
+        shadow true
+
+        info {
+            font "Sans"
+            title-size 13.5
+            app-id-size 10
+            workspace-size 9.5
+            padding-x 12
+            padding-y 9
+            height 58
+        }
+
+        // Per-card blur of the already blurred desktop.
+        blur {
+            on
+            passes 2
+            offset 2
+        }
+    }
+
+    // pop | slide | drop | burst | vortex | flip | cascade | orbit | wave | zoom | cycle
+    // cycle walks the ten styles in order, one per card, continuing across openings.
+    // random is an alias.
+    motion {
+        style "slide"
     }
 
     backdrop {
@@ -76,12 +108,12 @@ window-picker {
         }
     }
 
-    // Motion: stagger between previews, optional spring/easing override,
-    // and the highlight ring shown behind previews matching your filter.
+    // Stagger between previews and the accent glow for hover/focus.
     stagger-ms 28
     selection {
-        active-color "#73daca88"
-        width 26
+        focused-color "#73dacaff"
+        hover-color "#73dacaff"
+        glow true
     }
 
     animation {
@@ -92,7 +124,9 @@ window-picker {
 }
 ```
 
-Selecting a window now flies its preview back toward that window while everything else fades out.
+Each card keeps the window preview at full card width, adds an app id/title/workspace strip below it, and anchors the label one third inside the card. Cards default to enabled; set `card { off }` to restore the old preview-only look. The focused window keeps the hover-style scale and gets a breathing accent glow.
+
+Selecting a window now flies its preview back toward that window while everything else scatters/fades out.
 
 ### Workspace Switch Zoom Dip
 

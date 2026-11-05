@@ -807,7 +807,22 @@ impl<W: LayoutElement> Tile<W> {
         is_focused: bool,
         is_solo_window: bool,
         is_floating: bool,
+        layout_has_keyboard_focus: bool,
     ) {
+        // When the keyboard focus is on a layer surface, popup, or other non-window UI, an
+        // `is_focused=false` for this tile does not mean that the window itself lost focus. Keep
+        // `was_focused` frozen so closing that UI does not re-trigger the flash on the same window.
+        // Still advance an already-running animation, otherwise it could get stuck mid-flash.
+        if !layout_has_keyboard_focus {
+            if matches!(
+                self.focus_animation_state,
+                FocusAnimationState::Flashing { .. }
+            ) {
+                self.advance_focus_animation();
+            }
+            return;
+        }
+
         let focus_config = &layout_config.focus_animation;
         let scale_config = &focus_config.scale;
 

@@ -3689,7 +3689,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.interactive_resize = None;
     }
 
-    pub fn refresh(&mut self, is_active: bool, is_focused: bool) {
+    pub fn refresh(&mut self, is_active: bool, is_focused: bool, layout_has_keyboard_focus: bool) {
         let is_solo_window = self.options.layout.focus_animation.enabled
             && self.options.layout.focus_animation.scale.enabled
             && self.columns.len() == 1
@@ -3750,6 +3750,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     is_focused_now,
                     is_solo_window,
                     false,
+                    layout_has_keyboard_focus,
                 );
 
                 let win = tile.window_mut();

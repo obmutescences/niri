@@ -1201,12 +1201,11 @@ impl State {
 
         // Track which picker preview the cursor is over, for the hover highlight ring.
         if self.niri.window_picker_ui.is_active() {
-            let hover = self
-                .niri
-                .output_under(location)
-                .and_then(|(output, pos)| {
-                    self.niri.window_picker_ui.window_under(&self.niri, output, pos)
-                });
+            let hover = self.niri.output_under(location).and_then(|(output, pos)| {
+                self.niri
+                    .window_picker_ui
+                    .window_under(&self.niri, output, pos)
+            });
             if self.niri.window_picker_ui.set_hover(hover) {
                 self.niri.queue_redraw_all();
             }
@@ -4361,7 +4360,7 @@ impl Niri {
             KeyboardFocus::WindowPicker => true,
         };
 
-        self.layout.refresh(layout_is_active);
+        self.layout.refresh(layout_is_active, layout_is_active);
     }
 
     pub fn refresh_idle_inhibit(&mut self) {
@@ -4783,13 +4782,14 @@ impl Niri {
             macro_rules! process {
                 ($geo:expr, $depth:expr) => {{
                     &mut |elem| {
-                        if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, $geo, $depth) {
+                        if let Some(elem) =
+                            scale_relocate_crop(elem, output_scale, zoom, $geo, $depth)
+                        {
                             push(elem.into());
                         }
                     }
                 }};
             }
-
 
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
@@ -7376,11 +7376,8 @@ fn scale_relocate_crop<E: Element>(
     zoom: f64,
     ws_geo: Rectangle<f64, Logical>,
     depth: Scale<f64>,
-) -> Option<
-    CropRenderElement<
-        RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<E>>>,
-    >,
-> {
+) -> Option<CropRenderElement<RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<E>>>>>
+{
     let ws_geo = ws_geo.to_physical_precise_round(output_scale);
     let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
     let elem = RelocateRenderElement::from_element(elem, ws_geo.loc, Relocate::Relative);
@@ -7395,7 +7392,6 @@ fn scale_relocate_crop<E: Element>(
 
     CropRenderElement::from_element(elem, output_scale, ws_geo)
 }
-
 
 niri_render_elements! {
     PointerRenderElements<R> => {
