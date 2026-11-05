@@ -357,8 +357,12 @@ where
                     let decoded_path = knuffel::traits::DecodeScalar::decode(path_val, ctx)?;
 
                     // Expand ~ into the home dir
-                    let Some(path) = expand_home_path(decoded_path, node, ctx) else {
-                        continue;
+                    let path = match expand_home_path(decoded_path, node, ctx) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            ctx.emit_error(e);
+                            continue;
+                        }
                     };
 
                     let recursion = ctx.get::<Recursion>().unwrap().0 + 1;
@@ -731,6 +735,35 @@ mod tests {
                 }
             }
             "#,
+        );
+    }
+
+    #[test]
+    fn parse_bind_pass_through() {
+        let config = do_parse(
+            r#"
+            binds {
+                Mod+A pass-through=true { close-window; }
+                Mod+B pass-through=false { close-window; }
+                Mod+C { close-window; } // Should be off by default
+            }
+            "#,
+        );
+
+        assert_eq!(config.binds.0[0].pass_through, Some(true));
+        assert_eq!(config.binds.0[1].pass_through, Some(false));
+        assert_eq!(config.binds.0[2].pass_through, None);
+    }
+
+    #[test]
+    fn parse_bind_pass_through_on_pointer_binds() {
+        assert_parse_error(
+            r#"
+            binds {
+                Mod+MouseLeft pass-through=true { close-window; }
+            }
+            "#,
+            "pass-through is only supported for keyboard binds",
         );
     }
 
@@ -2505,6 +2538,7 @@ mod tests {
                             ToggleKeyboardShortcutsInhibit,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: false,
@@ -2527,6 +2561,7 @@ mod tests {
                             ToggleKeyboardShortcutsInhibit,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: false,
@@ -2549,6 +2584,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: true,
                         allow_inhibiting: true,
@@ -2567,6 +2603,7 @@ mod tests {
                             CloseWindow,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2587,6 +2624,7 @@ mod tests {
                             FocusMonitorLeft,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2607,6 +2645,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2625,6 +2664,7 @@ mod tests {
                             MoveWindowToMonitorRight,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2645,6 +2685,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2665,6 +2706,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2683,6 +2725,7 @@ mod tests {
                             ConsumeWindowIntoColumn,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2705,6 +2748,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2727,6 +2771,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2747,6 +2792,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: false,
@@ -2763,6 +2809,7 @@ mod tests {
                             FocusWorkspaceDown,
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: Some(
                             150ms,
                         ),
@@ -2785,6 +2832,7 @@ mod tests {
                             ),
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: true,
                         allow_inhibiting: true,
@@ -2801,6 +2849,7 @@ mod tests {
                             ToggleOverview,
                         ),
                         repeat: false,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2817,6 +2866,7 @@ mod tests {
                             ToggleWindowFloating,
                         ),
                         repeat: false,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2874,6 +2924,7 @@ mod tests {
                 deactivate_unfocused_windows: false,
                 skip_cursor_only_updates_during_vrr: false,
                 disable_10bit_output: false,
+                nested_show_host_cursor: false,
             },
             workspaces: [
                 Workspace {
@@ -2945,6 +2996,7 @@ mod tests {
                             },
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2969,6 +3021,7 @@ mod tests {
                             },
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,
@@ -2995,6 +3048,7 @@ mod tests {
                             },
                         ),
                         repeat: true,
+                        pass_through: None,
                         cooldown: None,
                         allow_when_locked: false,
                         allow_inhibiting: true,

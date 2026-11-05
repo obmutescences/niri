@@ -770,6 +770,7 @@ impl ScreenshotUi {
                 key,
                 action: BoundAction::Press(action),
                 repeat: false, // Not useful for these actions.
+                pass_through: None,
                 cooldown: None,
                 allow_when_locked: true,
                 allow_inhibiting: false,
