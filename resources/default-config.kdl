@@ -493,7 +493,8 @@ window-picker {
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Window-Rules
 
-// Liquid glass example: refraction on the blurred background behind a window.
+// Liquid glass example: a tinted, refractive panel behind a window.
+// `tint` is independent of refraction: it works on plain blurred surfaces too.
 // interior-warp bends the WHOLE surface like a lens (not just the edge band);
 // positive values magnify the center, negative pinch it. 0 disables. Try 0.1-0.3;
 // large values smear content near the corners.
@@ -502,12 +503,32 @@ window-picker {
 //     background-effect {
 //         blur true
 //         saturation 1.15
+//         tint {
+//             from "#0b1a1fcc"
+//             to "#1f4a5acc"
+//             angle 135
+//             mode "linear"
+//             opacity 0.55
+//             // linear mode only:
+//             // linear-size 0.2    // solid start color along 20% of the axis
+//             // linear-depth 0.8   // start color alpha multiplier
+//             // radial mode only:
+//             // radial-size 0.35   // solid center color out to 35% of the radius
+//             // radial-depth 0.8   // center color alpha multiplier
+//         }
 //         liquid-glass {
 //             refraction-strength 20
 //             power-factor 1.5
 //             bevel-width 2.5
+//             bevel-px 18
 //             fringing 0.6
 //             interior-warp 0.18
+//             rim-color "#ffffff"
+//             rim-strength 0.8
+//             edge-lighting 1.0
+//             inner-shadow 0.15
+//             sheen-color "#ffffff"
+//             sheen-strength 0.25
 //         }
 //     }
 // }

@@ -2,19 +2,19 @@
 pub struct LiquidGlassOptions {
     pub refraction_strength: f64,
     pub power_factor: f64,
-    pub refraction_a: f64,
-    pub refraction_b: f64,
-    pub refraction_c: f64,
-    pub refraction_d: f64,
     pub refraction_power: f64,
     pub glow_weight: f64,
-    pub glow_bias: f64,
-    pub glow_edge0: f64,
-    pub glow_edge1: f64,
     pub bevel_width: f64,
+    pub bevel_px: f64,
     pub fringing: f64,
     /// Whole-surface lens warp (0 disables). Positive values magnify the center.
     pub interior_warp: f64,
+    pub rim_color: [f32; 4],
+    pub rim_strength: f64,
+    pub edge_lighting: f64,
+    pub inner_shadow: f64,
+    pub sheen_color: [f32; 4],
+    pub sheen_strength: f64,
 }
 
 impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
@@ -22,18 +22,18 @@ impl From<niri_config::LiquidGlass> for LiquidGlassOptions {
         Self {
             refraction_strength: config.refraction_strength,
             power_factor: config.power_factor,
-            refraction_a: config.refraction_a,
-            refraction_b: config.refraction_b,
-            refraction_c: config.refraction_c,
-            refraction_d: config.refraction_d,
             refraction_power: config.refraction_power,
             glow_weight: config.glow_weight,
-            glow_bias: config.glow_bias,
-            glow_edge0: config.glow_edge0,
-            glow_edge1: config.glow_edge1,
             bevel_width: config.bevel_width,
+            bevel_px: config.bevel_px,
             fringing: config.fringing,
             interior_warp: config.interior_warp,
+            rim_color: config.rim_color.to_array_unpremul(),
+            rim_strength: config.rim_strength,
+            edge_lighting: config.edge_lighting,
+            inner_shadow: config.inner_shadow,
+            sheen_color: config.sheen_color.to_array_unpremul(),
+            sheen_strength: config.sheen_strength,
         }
     }
 }

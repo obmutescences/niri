@@ -22,25 +22,44 @@ A physical-looking glass effect for windows and layer-shell surfaces, applied th
 
 ```kdl
 window-rule {
-    opacity 0.7
     background-effect {
         blur true
         xray false
         saturation 1.2
+
+        // Two-color gradient tint, independent of refraction. It replaces the
+        // old `border { width 0 }` + `draw-border-with-background true` trick.
+        tint {
+            from "#0b1a1fcc"
+            to "#1f4a5acc"
+            angle 135          // CSS linear-gradient angle
+            mode "linear"      // linear | radial
+            opacity 0.55       // multiplies the colors' alpha
+        }
+
         liquid-glass {
             refraction-strength 20   // how hard light bends at the edges (saturates at 20)
             power-factor 1.5         // curvature falloff across the bevel (1 = widest, range 1-10)
             refraction-power 1.8     // overall refraction intensity multiplier (>1 for stronger bend)
-            bevel-width 2.5          // width multiplier of the edge band where the effect lives
+            bevel-width 2.5          // relative width multiplier of the edge band
+            bevel-px 18              // absolute edge band width; >0 overrides bevel-width
             fringing 0.6             // RGB chromatic aberration at the edges
             interior-warp 0.18       // whole-surface lens bend (0 disables, try 0.1-0.3)
             glow-weight 0.08         // specular highlight intensity
+            rim-color "#ffffff"      // edge highlight color
+            rim-strength 0.8         // edge highlight strength
+            edge-lighting 1.0        // luminance-adaptive edge boost
+            inner-shadow 0.15        // dark inner edge for depth
+            sheen-color "#ffffff"    // soft top light
+            sheen-strength 0.25
         }
     }
 }
 ```
 
-`bevel-width` has the biggest visual impact: values above 1 widen the glass band around the window border, making the effect cover more area instead of just a thin rim.
+`tint` works with or without `liquid-glass`; when refraction is enabled, the gradient is mixed into the glass before the rim highlight, so it colors the refracted surface instead of covering it. `bevel-width` widens the glass band relative to the surface; `bevel-px` gives a predictable absolute width, which is useful for both small panels and large windows.
+
+Both modes have a size/depth pair. For `mode "linear"`, `linear-size` (`0..1`) keeps the start color solid for that fraction of the axis before blending to the end color, and `linear-depth` (`0..1`) scales the start color's alpha. For `mode "radial"`, `radial-size` keeps the center color solid out to that fraction of the radius, and `radial-depth` scales the center color's alpha. Lower depth values make that color lighter/less colored.
 
 ### Keyboard-Driven Window Picker
 

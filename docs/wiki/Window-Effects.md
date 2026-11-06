@@ -48,6 +48,39 @@ See those wiki pages for examples and limitations.
 
 Global blur settings are configured in the [`blur {}` config section](./Configuration:-Miscellaneous.md#blur) and apply to all background blur.
 
+### Tint and Liquid Glass
+
+A `tint {}` block applies a two-color linear or radial gradient to the background effect.
+It works with plain blur as well as with `liquid-glass`, and it replaces the old trick of setting `border { width 0 }` together with `draw-border-with-background true` to color a translucent window.
+
+```kdl
+background-effect {
+    blur true
+
+    tint {
+        from "#0b1a1fcc"
+        to "#1f4a5acc"
+        angle 135
+        mode "linear"
+        opacity 0.55
+    }
+
+    liquid-glass {
+        refraction-strength 20
+        bevel-px 18
+        rim-color "#ffffff"
+        rim-strength 0.8
+        inner-shadow 0.15
+        sheen-strength 0.25
+    }
+}
+```
+
+The tint is mixed into the glass before the rim highlight, so it colors the refracted surface rather than covering it.
+Because its alpha contributes panel opacity, the window itself can stay `opacity 1.0`, keeping text crisp.
+
+Both modes have a size/depth pair. For linear tints, `linear-size` keeps the start color solid along that fraction of the axis, and `linear-depth` scales the start color's alpha. For radial tints, `radial-size` controls how far the center color stays solid before blending to the edge color, and `radial-depth` scales the center color's alpha to make it deeper or lighter.
+
 ### Xray
 
 Xray makes the window background "see through" to your wallpaper, ignoring any other windows below.

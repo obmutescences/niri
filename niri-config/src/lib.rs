@@ -2459,6 +2459,7 @@ mod tests {
                         blur: None,
                         noise: None,
                         saturation: None,
+                        tint: None,
                         liquid_glass: None,
                     },
                     popups: PopupsRule {
@@ -2469,6 +2470,7 @@ mod tests {
                             blur: None,
                             noise: None,
                             saturation: None,
+                            tint: None,
                             liquid_glass: None,
                         },
                     },
@@ -2512,6 +2514,7 @@ mod tests {
                         blur: None,
                         noise: None,
                         saturation: None,
+                        tint: None,
                         liquid_glass: None,
                     },
                     popups: PopupsRule {
@@ -2522,6 +2525,7 @@ mod tests {
                             blur: None,
                             noise: None,
                             saturation: None,
+                            tint: None,
                             liquid_glass: None,
                         },
                     },

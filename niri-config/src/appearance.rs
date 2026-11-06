@@ -392,21 +392,28 @@ impl MergeWith<BlurPart> for Blur {
 pub struct LiquidGlass {
     pub refraction_strength: f64,
     pub power_factor: f64,
-    pub refraction_a: f64,
-    pub refraction_b: f64,
-    pub refraction_c: f64,
-    pub refraction_d: f64,
     pub refraction_power: f64,
     pub glow_weight: f64,
-    pub glow_bias: f64,
-    pub glow_edge0: f64,
-    pub glow_edge1: f64,
     /// Multiplier for the width of the edge band where refraction happens.
     pub bevel_width: f64,
+    /// Absolute edge band width in logical pixels. Overrides `bevel_width` when > 0.
+    pub bevel_px: f64,
     /// RGB chromatic aberration amount at the edges.
     pub fringing: f64,
     /// Whole-surface lens warp (0 disables). Positive values magnify the center.
     pub interior_warp: f64,
+    /// Color of the specular rim highlight.
+    pub rim_color: Color,
+    /// Strength multiplier for the rim highlight.
+    pub rim_strength: f64,
+    /// Strength multiplier for the luminance-adaptive edge boost.
+    pub edge_lighting: f64,
+    /// Strength of the dark inner edge shadow (0 disables).
+    pub inner_shadow: f64,
+    /// Color of the soft top sheen.
+    pub sheen_color: Color,
+    /// Strength of the soft top sheen (0 disables).
+    pub sheen_strength: f64,
 }
 
 impl Default for LiquidGlass {
@@ -414,18 +421,18 @@ impl Default for LiquidGlass {
         Self {
             refraction_strength: 1.0,
             power_factor: 3.0,
-            refraction_a: 0.04,
-            refraction_b: 5.0,
-            refraction_c: 5.0,
-            refraction_d: 8.0,
             refraction_power: 1.0,
             glow_weight: 0.08,
-            glow_bias: 0.0,
-            glow_edge0: 0.3,
-            glow_edge1: 0.9,
             bevel_width: 1.0,
+            bevel_px: 0.0,
             interior_warp: 0.0,
             fringing: 0.3,
+            rim_color: Color::from_rgba8_unpremul(255, 255, 255, 255),
+            rim_strength: 1.0,
+            edge_lighting: 1.0,
+            inner_shadow: 0.0,
+            sheen_color: Color::from_rgba8_unpremul(255, 255, 255, 255),
+            sheen_strength: 0.0,
         }
     }
 }
@@ -437,29 +444,29 @@ pub struct LiquidGlassPart {
     #[knuffel(child, unwrap(argument))]
     pub power_factor: Option<FloatOrInt<1, 10>>,
     #[knuffel(child, unwrap(argument))]
-    pub refraction_a: Option<FloatOrInt<0, 100>>,
-    #[knuffel(child, unwrap(argument))]
-    pub refraction_b: Option<FloatOrInt<0, 100>>,
-    #[knuffel(child, unwrap(argument))]
-    pub refraction_c: Option<FloatOrInt<0, 100>>,
-    #[knuffel(child, unwrap(argument))]
-    pub refraction_d: Option<FloatOrInt<0, 100>>,
-    #[knuffel(child, unwrap(argument))]
     pub refraction_power: Option<FloatOrInt<0, 100>>,
     #[knuffel(child, unwrap(argument))]
     pub glow_weight: Option<FloatOrInt<-100, 100>>,
     #[knuffel(child, unwrap(argument))]
-    pub glow_bias: Option<FloatOrInt<-100, 100>>,
-    #[knuffel(child, unwrap(argument))]
-    pub glow_edge0: Option<FloatOrInt<-100, 100>>,
-    #[knuffel(child, unwrap(argument))]
-    pub glow_edge1: Option<FloatOrInt<-100, 100>>,
-    #[knuffel(child, unwrap(argument))]
     pub bevel_width: Option<FloatOrInt<0, 20>>,
+    #[knuffel(child, unwrap(argument))]
+    pub bevel_px: Option<FloatOrInt<0, 1024>>,
     #[knuffel(child, unwrap(argument))]
     pub fringing: Option<FloatOrInt<0, 10>>,
     #[knuffel(child, unwrap(argument))]
     pub interior_warp: Option<FloatOrInt<-100, 100>>,
+    #[knuffel(child)]
+    pub rim_color: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub rim_strength: Option<FloatOrInt<0, 10>>,
+    #[knuffel(child, unwrap(argument))]
+    pub edge_lighting: Option<FloatOrInt<0, 10>>,
+    #[knuffel(child, unwrap(argument))]
+    pub inner_shadow: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child)]
+    pub sheen_color: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub sheen_strength: Option<FloatOrInt<0, 10>>,
 }
 
 impl MergeWith<LiquidGlassPart> for LiquidGlass {
@@ -468,19 +475,124 @@ impl MergeWith<LiquidGlassPart> for LiquidGlass {
             (self, part),
             refraction_strength,
             power_factor,
-            refraction_a,
-            refraction_b,
-            refraction_c,
-            refraction_d,
             refraction_power,
             glow_weight,
-            glow_bias,
-            glow_edge0,
-            glow_edge1,
             bevel_width,
+            bevel_px,
             fringing,
             interior_warp,
+            rim_strength,
+            edge_lighting,
+            inner_shadow,
+            sheen_strength,
         );
+
+        if let Some(x) = part.rim_color {
+            self.rim_color = x;
+        }
+        if let Some(x) = part.sheen_color {
+            self.sheen_color = x;
+        }
+    }
+}
+
+#[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TintMode {
+    #[default]
+    Linear,
+    Radial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundTint {
+    pub from: Color,
+    pub to: Color,
+    pub angle: f64,
+    pub mode: TintMode,
+    pub opacity: f64,
+    /// Fraction of the linear axis kept at the start color before blending.
+    pub linear_size: f64,
+    /// Multiplier for the start color's alpha in linear mode.
+    pub linear_depth: f64,
+    /// Fraction of the radial radius covered by the center color before blending.
+    pub radial_size: f64,
+    /// Multiplier for the center color's alpha in radial mode.
+    pub radial_depth: f64,
+}
+
+impl Default for BackgroundTint {
+    fn default() -> Self {
+        Self {
+            from: Color::default(),
+            to: Color::default(),
+            angle: 180.0,
+            mode: TintMode::Linear,
+            opacity: 1.0,
+            linear_size: 0.0,
+            linear_depth: 1.0,
+            radial_size: 0.0,
+            radial_depth: 1.0,
+        }
+    }
+}
+
+impl BackgroundTint {
+    pub fn is_visible(&self) -> bool {
+        self.opacity > 0.0 && (self.from.a > 0.0 || self.to.a > 0.0)
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+pub struct BackgroundTintPart {
+    #[knuffel(child)]
+    pub from: Option<Color>,
+    #[knuffel(child)]
+    pub to: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub angle: Option<FloatOrInt<0, 360>>,
+    #[knuffel(child, unwrap(argument))]
+    pub mode: Option<TintMode>,
+    #[knuffel(child, unwrap(argument))]
+    pub opacity: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub linear_size: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub linear_depth: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radial_size: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub radial_depth: Option<FloatOrInt<0, 1>>,
+}
+
+impl MergeWith<BackgroundTintPart> for BackgroundTint {
+    fn merge_with(&mut self, part: &BackgroundTintPart) {
+        if let Some(x) = part.from {
+            self.from = x;
+        }
+        if let Some(x) = part.to {
+            self.to = x;
+        }
+        if let Some(x) = part.angle {
+            self.angle = x.0;
+        }
+        if let Some(x) = part.mode {
+            self.mode = x;
+        }
+        if let Some(x) = part.opacity {
+            self.opacity = x.0;
+        }
+        if let Some(x) = part.linear_size {
+            self.linear_size = x.0;
+        }
+        if let Some(x) = part.linear_depth {
+            self.linear_depth = x.0;
+        }
+        if let Some(x) = part.radial_size {
+            self.radial_size = x.0;
+        }
+        if let Some(x) = part.radial_depth {
+            self.radial_depth = x.0;
+        }
     }
 }
 
@@ -1163,6 +1275,8 @@ pub struct BackgroundEffectRule {
     #[knuffel(child, unwrap(argument))]
     pub saturation: Option<FloatOrInt<0, 1000>>,
     #[knuffel(child)]
+    pub tint: Option<BackgroundTintPart>,
+    #[knuffel(child)]
     pub liquid_glass: Option<LiquidGlassPart>,
 }
 
@@ -1186,6 +1300,7 @@ pub struct BackgroundEffect {
 
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
+    pub tint: Option<BackgroundTint>,
     pub liquid_glass: Option<LiquidGlass>,
 }
 
@@ -1199,6 +1314,11 @@ impl MergeWith<BackgroundEffectRule> for BackgroundEffect {
 
         if let Some(x) = part.saturation {
             self.saturation = Some(x.0);
+        }
+
+        if let Some(tint) = &part.tint {
+            let entry = self.tint.get_or_insert(BackgroundTint::default());
+            entry.merge_with(tint);
         }
 
         if let Some(lg) = &part.liquid_glass {
@@ -1458,31 +1578,79 @@ mod tests {
     #[test]
     fn parse_liquid_glass() {
         let config = Config::parse_mem(
-            r#"
+            r##"
             window-rule {
                 match app-id="^test$"
                 background-effect {
                     xray true
+                    tint {
+                        from "#10203080"
+                        to "#405060c0"
+                        angle 135
+                        mode "radial"
+                        opacity 0.5
+                        radial-size 0.35
+                        radial-depth 0.6
+                        linear-size 0.2
+                        linear-depth 0.75
+                    }
                     liquid-glass {
                         refraction-strength 1.0
                         power-factor 3.0
                         refraction-power 1.5
                         bevel-width 2.5
+                        bevel-px 18
                         fringing 0.6
+                        rim-color "#f0e0d0"
+                        rim-strength 0.75
+                        edge-lighting 0.5
+                        inner-shadow 0.25
+                        sheen-color "#ffffff"
+                        sheen-strength 0.4
                     }
                 }
             }
-            "#,
+            "##,
         )
         .unwrap();
 
         let rule = &config.window_rules[0];
+        let tint = rule.background_effect.tint.unwrap();
+        assert_eq!(
+            tint.from,
+            Some(Color::from_rgba8_unpremul(0x10, 0x20, 0x30, 0x80))
+        );
+        assert_eq!(
+            tint.to,
+            Some(Color::from_rgba8_unpremul(0x40, 0x50, 0x60, 0xc0))
+        );
+        assert_eq!(tint.angle, Some(FloatOrInt(135.0)));
+        assert_eq!(tint.mode, Some(TintMode::Radial));
+        assert_eq!(tint.opacity, Some(FloatOrInt(0.5)));
+        assert_eq!(tint.radial_size, Some(FloatOrInt(0.35)));
+        assert_eq!(tint.radial_depth, Some(FloatOrInt(0.6)));
+        assert_eq!(tint.linear_size, Some(FloatOrInt(0.2)));
+        assert_eq!(tint.linear_depth, Some(FloatOrInt(0.75)));
+
         let lg = rule.background_effect.liquid_glass.unwrap();
         assert_eq!(lg.refraction_strength, Some(FloatOrInt(1.0)));
         assert_eq!(lg.power_factor, Some(FloatOrInt(3.0)));
         assert_eq!(lg.refraction_power, Some(FloatOrInt(1.5)));
         assert_eq!(lg.bevel_width, Some(FloatOrInt(2.5)));
+        assert_eq!(lg.bevel_px, Some(FloatOrInt(18.0)));
         assert_eq!(lg.fringing, Some(FloatOrInt(0.6)));
+        assert_eq!(
+            lg.rim_color,
+            Some(Color::from_rgba8_unpremul(240, 224, 208, 255))
+        );
+        assert_eq!(lg.rim_strength, Some(FloatOrInt(0.75)));
+        assert_eq!(lg.edge_lighting, Some(FloatOrInt(0.5)));
+        assert_eq!(lg.inner_shadow, Some(FloatOrInt(0.25)));
+        assert_eq!(
+            lg.sheen_color,
+            Some(Color::from_rgba8_unpremul(255, 255, 255, 255))
+        );
+        assert_eq!(lg.sheen_strength, Some(FloatOrInt(0.4)));
     }
 
     #[test]
@@ -1490,11 +1658,19 @@ mod tests {
         let lg = LiquidGlass::default();
         assert_eq!(lg.refraction_power, 1.0);
         assert_eq!(lg.bevel_width, 1.0);
+        assert_eq!(lg.bevel_px, 0.0);
         assert_eq!(lg.fringing, 0.3);
+        assert_eq!(lg.rim_strength, 1.0);
+        assert_eq!(lg.edge_lighting, 1.0);
+        assert_eq!(lg.inner_shadow, 0.0);
+        assert_eq!(lg.sheen_strength, 0.0);
 
-        // Defaults must be a no-op relative to the previous hardcoded behavior:
-        // fringing used to always be 0.3, and there was no power multiplier.
-        assert!((lg.fringing - 0.3).abs() < f64::EPSILON);
+        let tint = BackgroundTint::default();
+        assert_eq!(tint.linear_size, 0.0);
+        assert_eq!(tint.linear_depth, 1.0);
+        assert_eq!(tint.radial_size, 0.0);
+        assert_eq!(tint.radial_depth, 1.0);
+        assert!(!tint.is_visible());
     }
 }
 

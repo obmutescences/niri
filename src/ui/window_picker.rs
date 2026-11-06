@@ -1279,7 +1279,7 @@ impl WindowPickerUi {
                             passes: config.card.blur.passes,
                             offset: config.card.blur.offset.round(),
                         };
-                        let effect = effect.render(None, params, Some(blur), 0., 1., None);
+                        let effect = effect.render(None, params, Some(blur), 0., 1., None, None);
                         push(WindowPickerUiRenderElement::FramebufferEffect(effect));
                     }
                 }
@@ -1478,6 +1478,7 @@ impl WindowPickerUi {
                 blur,
                 0.,
                 saturation as f32,
+                None,
                 None,
             );
             push(WindowPickerUiRenderElement::FramebufferEffect(effect));

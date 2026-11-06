@@ -998,6 +998,50 @@ Override the background effect options for this window.
 - `blur`: set to `true` to enable blur behind this window, or `false` to force-disable it.
 - `noise`: amount of pixel noise added to the background (helps with color banding from blur).
 - `saturation`: color saturation of the background (`0` is desaturated, `1` is normal, `2` is 200% saturation).
+- `tint`: two-color gradient applied to the background effect.
+  - `from`, `to`: gradient colors (CSS color syntax, alpha supported).
+  - `angle`: CSS linear-gradient angle (default `180`, top-to-bottom).
+  - `mode`: `linear` (default) or `radial`.
+  - `opacity`: multiplies the colors' alpha (`0` to `1`, default `1`).
+  - `linear-size`: linear mode only; fraction of the axis kept at the start color before blending (`0` to `1`, default `0`).
+  - `linear-depth`: linear mode only; multiplier for the start color's alpha (`0` to `1`, default `1`).
+  - `radial-size`: radial mode only; fraction of the radius that stays center-colored before blending (`0` to `1`, default `0`).
+  - `radial-depth`: radial mode only; multiplier for the center color's alpha (`0` to `1`, default `1`; lower makes the center lighter).
+- `liquid-glass`: refraction and rim styling. It composes with `tint`.
+
+```kdl
+window-rule {
+    background-effect {
+        blur true
+
+        tint {
+            from "#0b1a1fcc"
+            to "#1f4a5acc"
+            angle 135
+            mode "linear"
+            opacity 0.55
+        }
+
+        liquid-glass {
+            refraction-strength 20
+            power-factor 1.5
+            bevel-width 2.5
+            bevel-px 18
+            fringing 0.6
+            interior-warp 0.18
+            glow-weight 0.08
+            rim-color "#ffffff"
+            rim-strength 0.8
+            edge-lighting 1.0
+            inner-shadow 0.15
+            sheen-color "#ffffff"
+            sheen-strength 0.25
+        }
+    }
+}
+```
+
+`tint` is applied inside the background effect, so it colors the refracted glass instead of covering it. `bevel-px` sets an absolute edge-band width in logical pixels and overrides `bevel-width` when greater than zero.
 
 See the [window effects page](./Window-Effects.md) for an overview of background effects.
 

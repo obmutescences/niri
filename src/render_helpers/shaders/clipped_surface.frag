@@ -26,24 +26,33 @@ uniform vec2 geo_size;
 uniform vec4 corner_radius;
 uniform mat3 input_to_geo;
 
+uniform vec4 tint_from;
+uniform vec4 tint_to;
+uniform float tint_angle;
+uniform float tint_mode;
+uniform float tint_opacity;
+uniform float tint_linear_size;
+uniform float tint_linear_depth;
+uniform float tint_radial_size;
+uniform float tint_radial_depth;
+
 uniform float lg_refraction_strength;
 uniform float lg_power_factor;
-uniform float lg_refraction_a;
-uniform float lg_refraction_b;
-uniform float lg_refraction_c;
-uniform float lg_refraction_d;
 uniform float lg_refraction_power;
 uniform float lg_physical_refraction;
 uniform float lg_glow_weight;
-uniform float lg_glow_bias;
-uniform float lg_glow_edge0;
-uniform float lg_glow_edge1;
 uniform float lg_edge_lighting;
 uniform float lg_fringing;
 uniform float lg_bevel_width;
+uniform float lg_bevel_px;
 // Interior lens warp: bends the whole surface like a lens, not just the edge band.
 // 0 disables; positive values pull samples toward the center (magnify).
 uniform float lg_interior_warp;
+uniform vec4 lg_rim_color;
+uniform float lg_rim_strength;
+uniform float lg_inner_shadow;
+uniform vec4 lg_sheen_color;
+uniform float lg_sheen_strength;
 
 float niri_rounding_alpha(vec2 coords, vec2 size, vec4 corner_radius);
 vec4 postprocess(vec4 color);
@@ -64,6 +73,72 @@ float rounded_rectangle_dist(vec2 p, vec2 b, vec4 radius)
         : (p.y > 0.0 ? radius.x : radius.z);
     vec2 q = abs(p) - b + r;
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+vec4 tint_color(vec2 uv) {
+    vec2 size = max(geo_size, vec2(1.0));
+    vec2 p = uv * size;
+    float t;
+    vec4 from = tint_from;
+
+    if (tint_mode < 0.5) {
+        // CSS linear-gradient angle: 0 = bottom-to-top, 90 = left-to-right,
+        // 180 = top-to-bottom.
+        float angle = radians(tint_angle);
+        vec2 dir = vec2(sin(angle), -cos(angle));
+        float extent = max(dot(abs(dir), size), 1.0);
+        float raw_t = clamp(dot(p - size * 0.5, dir) / extent + 0.5, 0.0, 1.0);
+
+        // linear-size keeps the start color solid for this fraction of the axis
+        // before blending to the end color.
+        float solid = clamp(tint_linear_size, 0.0, 1.0);
+        t = clamp((raw_t - solid) / max(1.0 - solid, 0.0001), 0.0, 1.0);
+        from.a = clamp(from.a * clamp(tint_linear_depth, 0.0, 1.0), 0.0, 1.0);
+    } else {
+        vec2 d = (p - size * 0.5) / (max(size.x, size.y) * 0.5);
+        float r = clamp(length(d), 0.0, 1.0);
+
+        // radial-size keeps the center color solid out to this fraction of the
+        // radius, then blends to the edge color.
+        float inner = clamp(tint_radial_size, 0.0, 1.0);
+        t = clamp((r - inner) / max(1.0 - inner, 0.0001), 0.0, 1.0);
+
+        // radial-depth makes the center color stronger or lighter independently
+        // of the spatial size.
+        from.a = clamp(from.a * clamp(tint_radial_depth, 0.0, 1.0), 0.0, 1.0);
+    }
+
+    return mix(from, tint_to, t);
+}
+
+vec4 apply_tint(vec4 color, vec2 uv) {
+    if (tint_opacity <= 0.0001) {
+        return color;
+    }
+
+    vec4 tint = tint_color(uv);
+    float a = clamp(tint.a * tint_opacity, 0.0, 1.0);
+
+    // Premultiplied "over": colors the glass and, on transparent samples, also
+    // contributes panel opacity like the old border background layer did.
+    vec3 rgb = tint.rgb * a + color.rgb * (1.0 - a);
+    float alpha = a + color.a * (1.0 - a);
+    return vec4(rgb, alpha);
+}
+
+vec4 apply_sheen(vec4 color, vec2 uv) {
+    if (lg_sheen_strength <= 0.0001) {
+        return color;
+    }
+
+    float mask = clamp(1.0 - uv.y / 0.5, 0.0, 1.0);
+    mask *= mask;
+    float a = clamp(lg_sheen_color.a * lg_sheen_strength * mask, 0.0, 1.0);
+
+    // Color is premultiplied; mix in unpremultiplied space and re-premultiply.
+    vec3 base = color.a > 0.0001 ? color.rgb / color.a : color.rgb;
+    vec3 lit = mix(base, lg_sheen_color.rgb, a);
+    return vec4(lit * color.a, color.a);
 }
 
 GlassFragment glass_refraction(
@@ -125,7 +200,6 @@ GlassFragment snells_refraction(
     vec2 position,
     vec2 half_size,
     vec4 radius,
-    float min_half_size,
     float dist,
     float edge_factor,
     float concave_factor,
@@ -133,9 +207,8 @@ GlassFragment snells_refraction(
     float refraction_bevel_intensity,
     float refraction_offset_strength,
     float refraction_rgb_fringing,
-    float bevel_width
+    float band_width
 ) {
-    float band_width = max(min_half_size * 0.15 * bevel_width, 4.0);
     float ior = 1.0 + refraction_strength * 0.5;
 
     float min_r = min(min(radius.x, radius.y), min(radius.z, radius.w));
@@ -202,19 +275,20 @@ vec3 glass_outline(
     // subtle brightness boost that preserves its hue.
     float lum = dot(sample.color.rgb, vec3(0.299, 0.587, 0.114));
 
-    float rim_mask = clamp(0.25 * sample.concaveFactor, 0.0, glow_strength);
+    float rim_mask = clamp(0.25 * sample.concaveFactor, 0.0, max(glow_strength, 0.0));
 
-    // Specular highlight: mix towards white, stronger on light content.
-    float spec_strength = rim_mask * edge_lighting * (0.08 + lum * 0.7);
-    vec3 glow = mix(sample.color.rgb, vec3(1.0), spec_strength);
+    // Specular highlight: mixes towards the configured rim color.
+    float spec_strength = clamp(
+        rim_mask * edge_lighting * (0.08 + lum * 0.7) * lg_rim_strength * lg_rim_color.a,
+        0.0,
+        1.0
+    );
+    vec3 glow = mix(sample.color.rgb, lg_rim_color.rgb, spec_strength);
 
-    // Edge brightness boost: replaces the old additive doubling with a
-    // multiplicative boost that is stronger on dark content (to keep glass
-    // edges visible) and weaker on light content (which is already bright).
-    if (edge_lighting > 0.5) {
-        float boost = sample.concaveFactor * 0.4 * (1.0 - lum * 0.6);
-        glow = glow * (1.0 + boost);
-    }
+    // Edge brightness boost: stronger on dark content (to keep glass edges
+    // visible) and weaker on light content (which is already bright).
+    float boost = sample.concaveFactor * 0.4 * (1.0 - lum * 0.6) * edge_lighting;
+    glow = glow * (1.0 + clamp(boost, 0.0, 2.0));
 
     // Corner highlights: subtle extra specular at top-left and bottom-right.
     if (glow_strength > 0.0) {
@@ -228,10 +302,14 @@ vec3 glass_outline(
             * smoothstep(-blur_size.x * 0.7, blur_size.x * 0.7, position.x);
 
         float corner = thickness_shadow * 0.35;
-        float corner_spec = corner * (0.08 + lum * 0.6);
+        float corner_spec = clamp(
+            corner * (0.08 + lum * 0.6) * lg_rim_strength * lg_rim_color.a,
+            0.0,
+            1.0
+        );
 
-        glow = mix(glow, vec3(1.0), corner_spec * shadow_mask);
-        glow = mix(glow, vec3(1.0), corner_spec * highlight_mask);
+        glow = mix(glow, lg_rim_color.rgb, corner_spec * shadow_mask);
+        glow = mix(glow, lg_rim_color.rgb, corner_spec * highlight_mask);
     }
 
     return glow;
@@ -264,7 +342,10 @@ vec4 glass_effect(
         return base_color;
     }
 
-    float band_width = clamp(min_half_size * 0.15 * bevel_width, 0.1, min_half_size * 0.9);
+    float relative_band = clamp(min_half_size * 0.15 * bevel_width, 0.1, min_half_size * 0.9);
+    float band_width = lg_bevel_px > 0.0
+        ? clamp(lg_bevel_px, 0.1, min_half_size * 0.9)
+        : relative_band;
     float edge_factor = 1.0 - clamp(abs(dist) / band_width, 0.0, 1.0);
     float concave_factor = 1.0
         - sqrt(1.0 - pow(smoothstep(0.0, 1.0, edge_factor), refraction_normal_pow));
@@ -290,7 +371,6 @@ vec4 glass_effect(
                 position,
                 half_size,
                 sdf_radius,
-                min_half_size,
                 dist,
                 edge_factor,
                 concave_factor,
@@ -298,7 +378,7 @@ vec4 glass_effect(
                 refraction_bevel_intensity,
                 refraction_offset_strength,
                 refraction_rgb_fringing,
-                bevel_width
+                band_width
             );
     } else {
         sample = GlassFragment(
@@ -311,11 +391,20 @@ vec4 glass_effect(
         );
     }
 
+    sample.color = apply_tint(sample.color, uv_geo);
+
+    if (lg_inner_shadow > 0.0) {
+        // Darken the inner side of the bevel to give the pane some depth.
+        float inner = smoothstep(0.0, band_width * 2.0, abs(dist));
+        float shadow = lg_inner_shadow * (1.0 - inner);
+        sample.color.rgb *= 1.0 - shadow * 0.5;
+    }
+
     vec3 rgb = sample.concaveFactor <= 1.0
         ? glass_outline(position, blur_size, sample, glow_strength, edge_lighting)
         : sample.color.rgb;
 
-    return vec4(rgb, sample.color.a);
+    return apply_sheen(vec4(rgb, sample.color.a), uv_geo);
 }
 
 void main() {
@@ -366,6 +455,11 @@ void main() {
             lg_edge_lighting,
             lg_bevel_width
         );
+    } else if (inside_geo * step(0.0001, tint_opacity + lg_sheen_strength) > 0.0) {
+        // Tint and sheen work independently of refraction, so a plain blurred
+        // panel can still get the gradient and top light.
+        color = apply_tint(color, coords_geo.xy);
+        color = apply_sheen(color, coords_geo.xy);
     }
 
     color = postprocess(color);

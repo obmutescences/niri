@@ -16,6 +16,7 @@ use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, T
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 use crate::render_helpers::background_effect::RenderParams;
 use crate::render_helpers::effect_buffer::EffectBuffer;
+use crate::render_helpers::glass_tint::GlassTintOptions;
 use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
@@ -82,6 +83,7 @@ pub struct XrayElement {
     saturation: f32,
     bg_color: Color32F,
     program: Option<GlesTexProgram>,
+    tint: Option<GlassTintOptions>,
     liquid_glass: Option<LiquidGlassOptions>,
 }
 
@@ -104,6 +106,7 @@ impl Xray {
         blur: bool,
         noise: f32,
         saturation: f32,
+        tint_options: Option<GlassTintOptions>,
         liquid_glass_options: Option<LiquidGlassOptions>,
         push: &mut dyn FnMut(XrayElement),
     ) {
@@ -205,6 +208,7 @@ impl Xray {
                     saturation,
                     bg_color: *bg_color,
                     program: program.clone(),
+                    tint: tint_options,
                     liquid_glass: liquid_glass_options,
                 };
                 push(elem);
@@ -256,6 +260,7 @@ impl Xray {
                 saturation,
                 bg_color: self.backdrop_color,
                 program: program.clone(),
+                tint: tint_options,
                 liquid_glass: liquid_glass_options,
             };
             push(elem);
@@ -275,10 +280,26 @@ impl XrayElement {
             Uniform::new("bg_color", self.bg_color.components()),
         ];
 
+        extend_tint_uniforms(&mut uniforms, self.tint);
         extend_liquid_glass_uniforms(&mut uniforms, self.liquid_glass);
 
         uniforms
     }
+}
+
+fn extend_tint_uniforms(uniforms: &mut Vec<Uniform<'static>>, tint: Option<GlassTintOptions>) {
+    let tint = tint.unwrap_or_default();
+    uniforms.extend([
+        Uniform::new("tint_from", tint.from),
+        Uniform::new("tint_to", tint.to),
+        Uniform::new("tint_angle", tint.angle),
+        Uniform::new("tint_mode", tint.mode),
+        Uniform::new("tint_opacity", tint.opacity),
+        Uniform::new("tint_linear_size", tint.linear_size),
+        Uniform::new("tint_linear_depth", tint.linear_depth),
+        Uniform::new("tint_radial_size", tint.radial_size),
+        Uniform::new("tint_radial_depth", tint.radial_depth),
+    ]);
 }
 
 fn extend_liquid_glass_uniforms(
@@ -289,20 +310,19 @@ fn extend_liquid_glass_uniforms(
     uniforms.extend([
         Uniform::new("lg_refraction_strength", lg.refraction_strength as f32),
         Uniform::new("lg_power_factor", lg.power_factor as f32),
-        Uniform::new("lg_refraction_a", lg.refraction_a as f32),
-        Uniform::new("lg_refraction_b", lg.refraction_b as f32),
-        Uniform::new("lg_refraction_c", lg.refraction_c as f32),
-        Uniform::new("lg_refraction_d", lg.refraction_d as f32),
         Uniform::new("lg_refraction_power", lg.refraction_power as f32),
         Uniform::new("lg_physical_refraction", 0.0f32),
         Uniform::new("lg_glow_weight", lg.glow_weight as f32),
-        Uniform::new("lg_glow_bias", lg.glow_bias as f32),
-        Uniform::new("lg_glow_edge0", lg.glow_edge0 as f32),
-        Uniform::new("lg_glow_edge1", lg.glow_edge1 as f32),
-        Uniform::new("lg_edge_lighting", 1.0f32),
+        Uniform::new("lg_edge_lighting", lg.edge_lighting as f32),
         Uniform::new("lg_fringing", lg.fringing as f32),
         Uniform::new("lg_bevel_width", lg.bevel_width as f32),
+        Uniform::new("lg_bevel_px", lg.bevel_px as f32),
         Uniform::new("lg_interior_warp", lg.interior_warp as f32),
+        Uniform::new("lg_rim_color", lg.rim_color),
+        Uniform::new("lg_rim_strength", lg.rim_strength as f32),
+        Uniform::new("lg_inner_shadow", lg.inner_shadow as f32),
+        Uniform::new("lg_sheen_color", lg.sheen_color),
+        Uniform::new("lg_sheen_strength", lg.sheen_strength as f32),
     ]);
 }
 
