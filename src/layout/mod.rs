@@ -209,6 +209,7 @@ pub trait LayoutElement {
         _radius: CornerRadius,
         _xray_pos: XrayPos,
         _force_xray: bool,
+        _focus_progress: f32,
         _push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
     }

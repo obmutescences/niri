@@ -741,6 +741,7 @@ impl LayoutElement for Mapped {
                 false,
                 false,
                 xray_pos,
+                0.,
                 &mut |elem| push(elem.into()),
             );
         }
@@ -756,6 +757,7 @@ impl LayoutElement for Mapped {
         radius: CornerRadius,
         xray_pos: XrayPos,
         force_xray: bool,
+        focus_progress: f32,
         push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
         let should_block_out = ctx.target.should_block_out(self.rules.block_out_from);
@@ -774,6 +776,7 @@ impl LayoutElement for Mapped {
             force_xray,
             should_block_out,
             xray_pos,
+            focus_progress,
             push,
         );
     }

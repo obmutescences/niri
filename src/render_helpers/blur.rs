@@ -9,6 +9,7 @@ use smithay::backend::renderer::{ContextId, Renderer as _, Texture as _};
 use smithay::gpu_span_location;
 use smithay::utils::{Buffer, Size};
 
+use crate::render_helpers::resources::Resources;
 use crate::render_helpers::shaders::Shaders;
 
 #[derive(Debug)]
@@ -116,49 +117,59 @@ impl Blur {
         let _span = tracy_client::span!("Blur::prepare_textures");
 
         let passes = options.passes.clamp(1, 31) as usize;
+        let half_res_output = passes >= 3;
         let size = source.size();
+        let expected_first_size = if half_res_output {
+            Size::new(max(1, size.w / 2), max(1, size.h / 2))
+        } else {
+            size
+        };
 
         if let Some(output) = self.textures.first_mut() {
             let old_size = output.size();
-            if old_size != size {
+            if old_size != expected_first_size {
                 trace!(
                     "recreating textures: output size changed from {} × {} to {} × {}",
                     old_size.w,
                     old_size.h,
-                    size.w,
-                    size.h
+                    expected_first_size.w,
+                    expected_first_size.h
                 );
                 self.textures.clear();
             } else if !output.is_unique_reference() {
                 debug!("recreating textures: not unique",);
-                // We only need to recreate the output texture here, but this case shouldn't really
-                // happen anyway, and this is simpler.
                 self.textures.clear();
             }
         }
 
-        // Create any missing textures.
+        // Create any missing textures. For heavy blurs (`passes >= 3`), skip allocating the
+        // full-resolution level 0 output texture and stop upsampling at 1/2 resolution (hardware
+        // bilinear filtering handles the final 2x upscale at zero visual loss while saving 75%
+        // final-pass fill rate and a full-screen RGBA8 texture).
+        let start_level = usize::from(half_res_output);
         let mut w = size.w;
         let mut h = size.h;
-        for i in 0..=passes {
-            let size = Size::new(w, h);
+        for level in 0..=passes {
+            let tex_size = Size::new(w, h);
             w = max(1, w / 2);
             h = max(1, h / 2);
 
-            if self.textures.len() > i {
-                // This texture already exists.
+            if level < start_level {
+                continue;
+            }
+            let idx = level - start_level;
+
+            if self.textures.len() > idx {
                 continue;
             }
 
-            // debug!("creating texture for step {i} sized {w} × {h}");
-
             let texture: GlesTexture =
-                create_texture(Fourcc::Abgr8888, size).context("error creating texture")?;
+                create_texture(Fourcc::Abgr8888, tex_size).context("error creating texture")?;
             self.textures.push(texture);
         }
 
-        // Drop any no longer needed textures.
-        self.textures.drain(passes + 1..);
+        let needed = passes + 1 - start_level;
+        self.textures.drain(needed..);
 
         Ok(())
     }
@@ -178,19 +189,26 @@ impl Blur {
         );
 
         let passes = options.passes.clamp(1, 31) as usize;
+        let half_res_output = passes >= 3;
+        let start_level = usize::from(half_res_output);
+        let expected_len = passes + 1 - start_level;
         let size = source.size();
+        let expected_first_size = if half_res_output {
+            Size::new(max(1, size.w / 2), max(1, size.h / 2))
+        } else {
+            size
+        };
 
         ensure!(
-            self.textures.len() == passes + 1,
-            "wrong textures len: expected {}, got {}",
-            passes + 1,
+            self.textures.len() == expected_len,
+            "wrong textures len: expected {expected_len}, got {}",
             self.textures.len()
         );
 
         let output = &mut self.textures[0];
         ensure!(
-            output.size() == size,
-            "wrong output texture size: expected {size:?}, got {:?}",
+            output.size() == expected_first_size,
+            "wrong output texture size: expected {expected_first_size:?}, got {:?}",
             output.size()
         );
 
@@ -198,6 +216,11 @@ impl Blur {
             output.is_unique_reference(),
             "output texture has a non-unique reference"
         );
+
+        let pooled = Resources::get_from_renderer(renderer).map(|res| {
+            let res = res.borrow();
+            (res.blur_fbo, res.blur_vbo)
+        });
 
         renderer.with_profiled_context(gpu_span_location!("Blur::render"), |gl| unsafe {
             while gl.GetError() != ffi::NO_ERROR {}
@@ -207,29 +230,46 @@ impl Blur {
 
             gl.ActiveTexture(ffi::TEXTURE0);
 
-            let mut fbos = [0; 2];
-            gl.GenFramebuffers(fbos.len() as _, fbos.as_mut_ptr());
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbos[0]);
+            let mut prev_fbo = 0i32;
+            gl.GetIntegerv(ffi::FRAMEBUFFER_BINDING, &mut prev_fbo as *mut _);
+
+            let mut temp_fbo = 0;
+            let fbo = if let Some((pooled_fbo, _)) = pooled {
+                pooled_fbo
+            } else {
+                gl.GenFramebuffers(1, &mut temp_fbo as *mut _);
+                temp_fbo
+            };
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+
+            let vertices: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
+            let bind_quad = |attrib: u32| {
+                gl.EnableVertexAttribArray(attrib);
+                if let Some((_, vbo)) = pooled {
+                    gl.BindBuffer(ffi::ARRAY_BUFFER, vbo);
+                    gl.VertexAttribPointer(attrib, 2, ffi::FLOAT, ffi::FALSE, 0, std::ptr::null());
+                } else {
+                    gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+                    gl.VertexAttribPointer(
+                        attrib,
+                        2,
+                        ffi::FLOAT,
+                        ffi::FALSE,
+                        0,
+                        vertices.as_ptr().cast(),
+                    );
+                }
+            };
 
             let program = &self.program.0.down;
             gl.UseProgram(program.program);
             gl.Uniform1i(program.uniform_tex, 0);
             gl.Uniform1f(program.uniform_offset, options.offset as f32);
+            bind_quad(program.attrib_vert as u32);
 
-            let vertices: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
-            gl.EnableVertexAttribArray(program.attrib_vert as u32);
-            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
-            gl.VertexAttribPointer(
-                program.attrib_vert as u32,
-                2,
-                ffi::FLOAT,
-                ffi::FALSE,
-                0,
-                vertices.as_ptr().cast(),
-            );
-
-            let src = once(source).chain(&self.textures[1..]);
-            let dst = &self.textures[1..];
+            let down_start = usize::from(!half_res_output);
+            let src = once(source).chain(&self.textures[down_start..]);
+            let dst = &self.textures[down_start..];
             for (src, dst) in zip(src, dst) {
                 let dst_size = dst.size();
                 let w = dst_size.w;
@@ -275,18 +315,7 @@ impl Blur {
             gl.UseProgram(program.program);
             gl.Uniform1i(program.uniform_tex, 0);
             gl.Uniform1f(program.uniform_offset, options.offset as f32);
-
-            let vertices: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
-            gl.EnableVertexAttribArray(program.attrib_vert as u32);
-            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
-            gl.VertexAttribPointer(
-                program.attrib_vert as u32,
-                2,
-                ffi::FLOAT,
-                ffi::FALSE,
-                0,
-                vertices.as_ptr().cast(),
-            );
+            bind_quad(program.attrib_vert as u32);
 
             let src = self.textures.iter().rev();
             let dst = self.textures.iter().rev().skip(1);
@@ -332,9 +361,18 @@ impl Blur {
             }
 
             gl.DisableVertexAttribArray(program.attrib_vert as u32);
-
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-            gl.DeleteFramebuffers(fbos.len() as _, fbos.as_ptr());
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            gl.FramebufferTexture2D(
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                0,
+                0,
+            );
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, prev_fbo as u32);
+            if temp_fbo != 0 {
+                gl.DeleteFramebuffers(1, &temp_fbo);
+            }
         })?;
 
         Ok(self.textures[0].clone())

@@ -6,18 +6,21 @@ use glam::{Mat3, Vec2};
 use niri_config::CornerRadius;
 use smithay::backend::renderer::element::{Element, Id, RenderElement};
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform,
+    ffi, GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
 };
 use smithay::backend::renderer::utils::{CommitCounter, OpaqueRegions};
-use smithay::backend::renderer::Color32F;
+use smithay::backend::renderer::{Color32F, Texture as _};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 use crate::render_helpers::background_effect::RenderParams;
+use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::effect_buffer::EffectBuffer;
-use crate::render_helpers::glass_tint::GlassTintOptions;
-use crate::render_helpers::liquid_glass::LiquidGlassOptions;
+use crate::render_helpers::glass_tint::{extend_tint_uniforms, GlassTintOptions};
+use crate::render_helpers::liquid_glass::{
+    extend_liquid_glass_uniforms, geo_to_tex_linear, LiquidGlassOptions,
+};
 use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
 use crate::render_helpers::{RenderCtx, RenderTarget};
@@ -30,6 +33,8 @@ pub struct Xray {
     pub backdrop: [Rc<RefCell<EffectBuffer>>; RenderTarget::COUNT],
     pub backdrop_color: Color32F,
     pub workspaces: Vec<(Rectangle<f64, Logical>, Color32F)>,
+    /// Pointer position relative to this output's top-left corner, for interactive glass glow.
+    pub pointer_pos: Option<Point<f64, Logical>>,
 }
 
 /// Position for drawing xray background.
@@ -78,13 +83,15 @@ pub struct XrayElement {
     clip_geo_size: Vec2,
     corner_radius: CornerRadius,
     scale: f32,
-    blur: bool,
+    blur_options: Option<BlurOptions>,
     noise: f32,
     saturation: f32,
     bg_color: Color32F,
     program: Option<GlesTexProgram>,
     tint: Option<GlassTintOptions>,
     liquid_glass: Option<LiquidGlassOptions>,
+    cursor_pos_px: Option<[f32; 2]>,
+    focus_progress: f32,
 }
 
 impl Xray {
@@ -94,6 +101,7 @@ impl Xray {
             backdrop: array::from_fn(|_| Rc::new(RefCell::new(EffectBuffer::new()))),
             backdrop_color: Color32F::TRANSPARENT,
             workspaces: Vec::new(),
+            pointer_pos: None,
         }
     }
 
@@ -102,11 +110,13 @@ impl Xray {
         ctx: RenderCtx<GlesRenderer>,
         params: RenderParams,
         xray_pos: XrayPos,
-        blur: bool,
+        blur_options: Option<BlurOptions>,
         noise: f32,
         saturation: f32,
         tint_options: Option<GlassTintOptions>,
         liquid_glass_options: Option<LiquidGlassOptions>,
+        cursor_pos_px: Option<[f32; 2]>,
+        focus_progress: f32,
         push: &mut dyn FnMut(XrayElement),
     ) {
         let program = Shaders::get(ctx.renderer).postprocess_and_clip.clone();
@@ -131,7 +141,7 @@ impl Xray {
 
         let mut background = self.background[ctx.target as usize].borrow_mut();
         let prev = background.commit();
-        if background.prepare(ctx.renderer, blur) {
+        if background.prepare_with_blur(ctx.renderer, blur_options) {
             if background.commit() != prev {
                 trace!("background damaged");
             }
@@ -140,15 +150,8 @@ impl Xray {
             let buf_size = background.logical_size();
 
             for (ws_geo, bg_color) in &self.workspaces {
-                // If the background color is opaque, check if the workspace fully covers the
-                // element. In this case, we will skip the backdrop element since it's fully
-                // covered.
-                //
-                // FIXME: also implement some way to check if the background elements are fully
-                // covered in opaque regions, and not just the niri background color is opaque
                 let crop = if bg_color.is_opaque() && ws_geo.contains_rect(geo_in_backdrop) {
                     skip_backdrop = true;
-                    // No need to intersect, we know it's fully covered.
                     Some(geo_in_backdrop)
                 } else {
                     ws_geo.intersection(geo_in_backdrop)
@@ -158,14 +161,6 @@ impl Xray {
                     continue;
                 };
 
-                // If crop contains the intersection with backdrop, then the workspace fully
-                // covers the backdrop, so we can skip the backdrop.
-                //
-                // This can happen when the overview is closed (so workspaces align left/right with
-                // the backdrop) and the window is peeking out off screen to the side. In this
-                // case, this off-screen part is on top of nothing, neither workspace nor backdrop,
-                // but since the window doesn't fully cover the workspace, the check above doesn't
-                // skip the backdrop.
                 if bg_color.is_opaque()
                     && intersection_with_backdrop
                         .is_some_and(|backdrop| crop.contains_rect(backdrop))
@@ -173,8 +168,6 @@ impl Xray {
                     skip_backdrop = true;
                 }
 
-                // This can be different from zoom for surfaces that do not scale with
-                // workspaces, e.g. layer-shell top and overlay layer.
                 let ws_zoom = ws_geo.size / buf_size;
 
                 let src = Rectangle::new(crop.loc - ws_geo.loc, crop.size).downscale(ws_zoom);
@@ -202,25 +195,26 @@ impl Xray {
                     clip_geo_size,
                     corner_radius,
                     scale: params.scale as f32,
-                    blur,
+                    blur_options,
                     noise,
                     saturation,
                     bg_color: *bg_color,
                     program: program.clone(),
                     tint: tint_options,
                     liquid_glass: liquid_glass_options,
+                    cursor_pos_px,
+                    focus_progress,
                 };
                 push(elem);
             }
         }
 
-        // If the backdrop is fully covered by opaque background, we can skip it.
         if skip_backdrop {
             return;
         }
 
         let prev = backdrop.commit();
-        if backdrop.prepare(ctx.renderer, blur) {
+        if backdrop.prepare_with_blur(ctx.renderer, blur_options) {
             if backdrop.commit() != prev {
                 trace!("backdrop damaged");
             }
@@ -254,13 +248,15 @@ impl Xray {
                 clip_geo_size,
                 corner_radius: corner_radius.scaled_by(zoom as f32),
                 scale: params.scale as f32,
-                blur,
+                blur_options,
                 noise,
                 saturation,
                 bg_color: self.backdrop_color,
                 program: program.clone(),
                 tint: tint_options,
                 liquid_glass: liquid_glass_options,
+                cursor_pos_px: cursor_pos_px.map(|[x, y]| [x * zoom as f32, y * zoom as f32]),
+                focus_progress,
             };
             push(elem);
         }
@@ -268,61 +264,73 @@ impl Xray {
 }
 
 impl XrayElement {
-    fn compute_uniforms(&self) -> Vec<Uniform<'static>> {
+    fn compute_uniforms(&self, has_sharp_tex: bool) -> Vec<Uniform<'static>> {
         let mut uniforms = vec![
             Uniform::new("niri_scale", self.scale),
             Uniform::new("geo_size", <[f32; 2]>::from(self.clip_geo_size)),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
             mat3_uniform("input_to_geo", self.input_to_clip_geo),
+            Uniform::new(
+                "geo_to_tex_linear",
+                geo_to_tex_linear(self.input_to_clip_geo),
+            ),
+            Uniform::new("tex_sharp", 1i32),
+            Uniform::new("has_sharp_tex", if has_sharp_tex { 1.0f32 } else { 0.0f32 }),
             Uniform::new("noise", self.noise),
             Uniform::new("saturation", self.saturation),
             Uniform::new("bg_color", self.bg_color.components()),
         ];
 
         extend_tint_uniforms(&mut uniforms, self.tint);
-        extend_liquid_glass_uniforms(&mut uniforms, self.liquid_glass);
+        extend_liquid_glass_uniforms(
+            &mut uniforms,
+            self.liquid_glass,
+            self.cursor_pos_px,
+            self.focus_progress,
+        );
 
         uniforms
     }
 }
 
-fn extend_tint_uniforms(uniforms: &mut Vec<Uniform<'static>>, tint: Option<GlassTintOptions>) {
-    let tint = tint.unwrap_or_default();
-    uniforms.extend([
-        Uniform::new("tint_from", tint.from),
-        Uniform::new("tint_to", tint.to),
-        Uniform::new("tint_angle", tint.angle),
-        Uniform::new("tint_mode", tint.mode),
-        Uniform::new("tint_opacity", tint.opacity),
-        Uniform::new("tint_linear_size", tint.linear_size),
-        Uniform::new("tint_linear_depth", tint.linear_depth),
-        Uniform::new("tint_radial_size", tint.radial_size),
-        Uniform::new("tint_radial_depth", tint.radial_depth),
-    ]);
+pub(crate) fn bind_sharp_texture(
+    frame: &mut GlesFrame<'_, '_>,
+    sharp_tex: Option<&GlesTexture>,
+) -> Result<(), GlesError> {
+    if let Some(sharp) = sharp_tex {
+        frame.with_context(|gl| unsafe {
+            gl.ActiveTexture(ffi::TEXTURE1);
+            gl.BindTexture(ffi::TEXTURE_2D, sharp.tex_id());
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.ActiveTexture(ffi::TEXTURE0);
+        })?;
+    }
+    Ok(())
 }
 
-fn extend_liquid_glass_uniforms(
-    uniforms: &mut Vec<Uniform<'static>>,
-    liquid_glass: Option<LiquidGlassOptions>,
-) {
-    let lg = liquid_glass.unwrap_or_default();
-    uniforms.extend([
-        Uniform::new("lg_refraction_strength", lg.refraction_strength as f32),
-        Uniform::new("lg_power_factor", lg.power_factor as f32),
-        Uniform::new("lg_refraction_power", lg.refraction_power as f32),
-        Uniform::new("lg_physical_refraction", 0.0f32),
-        Uniform::new("lg_glow_weight", lg.glow_weight as f32),
-        Uniform::new("lg_edge_lighting", lg.edge_lighting as f32),
-        Uniform::new("lg_fringing", lg.fringing as f32),
-        Uniform::new("lg_bevel_width", lg.bevel_width as f32),
-        Uniform::new("lg_bevel_px", lg.bevel_px as f32),
-        Uniform::new("lg_interior_warp", lg.interior_warp as f32),
-        Uniform::new("lg_rim_color", lg.rim_color),
-        Uniform::new("lg_rim_strength", lg.rim_strength as f32),
-        Uniform::new("lg_inner_shadow", lg.inner_shadow as f32),
-        Uniform::new("lg_sheen_color", lg.sheen_color),
-        Uniform::new("lg_sheen_strength", lg.sheen_strength as f32),
-    ]);
+pub(crate) fn unbind_sharp_texture(
+    frame: &mut GlesFrame<'_, '_>,
+    had_sharp: bool,
+) -> Result<(), GlesError> {
+    if had_sharp {
+        frame.with_context(|gl| unsafe {
+            gl.ActiveTexture(ffi::TEXTURE1);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+        })?;
+    }
+    Ok(())
 }
 
 impl Element for XrayElement {
@@ -343,8 +351,6 @@ impl Element for XrayElement {
     }
 
     fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
-        // FIXME: if bg_color alpha is 1 then compute opaque regions here taking corners into
-        // account
         OpaqueRegions::default()
     }
 }
@@ -360,7 +366,7 @@ impl RenderElement<GlesRenderer> for XrayElement {
         _cache: Option<&UserDataMap>,
     ) -> Result<(), GlesError> {
         let mut buffer = self.buffer.borrow_mut();
-        let texture = match buffer.render(frame, self.blur) {
+        let (texture, sharp_tex) = match buffer.render_pair_with_blur(frame, self.blur_options) {
             Ok(x) => x,
             Err(err) => {
                 warn!("error rendering effect buffer: {err:?}");
@@ -368,18 +374,14 @@ impl RenderElement<GlesRenderer> for XrayElement {
             }
         };
 
-        // FIXME: avoid reallocating a fresh Vec here somehow.
         let mut filtered_damage = Vec::new();
         let damage = if let Some(subregion) = &self.subregion {
             let src_to_geo = self.geometry.size / self.src.size;
 
-            // Compute crop in geometry coordinates.
             let mut crop = src;
             crop.loc -= self.src.loc;
             crop = crop.upscale(src_to_geo);
             let mut crop = crop.to_logical(1., Transform::Normal, &Size::default());
-
-            // Then convert to subregion coordinates.
             crop.loc += self.geometry.loc;
 
             subregion.filter_damage(crop, dst, damage, &mut filtered_damage);
@@ -392,21 +394,39 @@ impl RenderElement<GlesRenderer> for XrayElement {
             damage
         };
 
-        let uniforms = self.program.is_some().then(|| self.compute_uniforms());
+        // Scale src proportionally if the blurred texture is rendered at half resolution.
+        let full_size = sharp_tex
+            .as_ref()
+            .map(|s| s.size())
+            .unwrap_or_else(|| texture.size());
+        let tex_scale = Scale {
+            x: texture.size().w as f64 / full_size.w.max(1) as f64,
+            y: texture.size().h as f64 / full_size.h.max(1) as f64,
+        };
+        let render_src = src.upscale(tex_scale);
+
+        let use_sharp =
+            sharp_tex.is_some() && self.liquid_glass.is_some_and(|lg| lg.bevel_clarity > 0.001);
+        let uniforms = self
+            .program
+            .is_some()
+            .then(|| self.compute_uniforms(use_sharp));
         let uniforms = uniforms.as_ref().map_or(&[][..], |x| &x[..]);
 
-        frame.render_texture_from_to(
+        bind_sharp_texture(frame, if use_sharp { sharp_tex.as_ref() } else { None })?;
+        let res = frame.render_texture_from_to(
             &texture,
-            src,
+            render_src,
             dst,
             damage,
-            // FIXME: opaque regions need to be filtered like damage.
             &[],
             Transform::Normal,
             1.,
             self.program.as_ref(),
             uniforms,
-        )
+        );
+        let _ = unbind_sharp_texture(frame, use_sharp);
+        res
     }
 }
 

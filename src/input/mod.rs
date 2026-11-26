@@ -59,7 +59,9 @@ use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, Niri, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
-use crate::ui::window_picker::{WindowPickerKeyResult, WindowPickerSession};
+use crate::ui::window_picker::{
+    WindowPickerClickResult, WindowPickerKeyResult, WindowPickerSession,
+};
 use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, with_toplevel_role, CastSessionId, ResizeEdge};
 use crate::window::mapped::MappedId;
@@ -537,6 +539,7 @@ impl State {
         let _ = consumed_by_a11y;
 
         let mut picker_selection = None;
+        let mut picker_close_window = None;
 
         // We can't use smithay's `input` here because we want to forward _and_ handle
         // events for modifier keys. This lets us do things like bind Control_L to an
@@ -731,11 +734,23 @@ impl State {
                     // picker, mirroring the old raw_latin_sym_or_raw_current_sym() behavior.
                     let picker_key = raw.first().copied().or(modified);
                     if let Some(key) = picker_key {
-                        let result = this.niri.window_picker_ui.handle_key(key);
+                        let result = this.niri.window_picker_ui.handle_key(
+                            &this.niri.layout,
+                            key,
+                            modified,
+                            mods.ctrl,
+                            mods.shift,
+                        );
                         this.niri.queue_redraw_all();
 
-                        if let WindowPickerKeyResult::Selected(id) = result {
-                            picker_selection = Some(id);
+                        match result {
+                            WindowPickerKeyResult::Handled => {}
+                            WindowPickerKeyResult::Selected(id) => {
+                                picker_selection = Some(id);
+                            }
+                            WindowPickerKeyResult::CloseWindow(id) => {
+                                picker_close_window = Some(id);
+                            }
                         }
                     }
                     return ShouldInterceptResult::InterceptOnly;
@@ -829,9 +844,18 @@ impl State {
 
         if let Some(id) = picker_selection {
             if let Some(window) = self.niri.find_window_by_id(id) {
-                self.niri.window_picker_ui.close();
                 self.update_keyboard_focus();
                 self.focus_window(&window);
+                self.niri
+                    .window_picker_ui
+                    .update_fly_back_target(&self.niri.layout, id);
+            }
+        }
+        if let Some(id) = picker_close_window {
+            if let Some(window) = self.niri.find_window_by_id(id) {
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.send_close();
+                }
             }
         }
 
@@ -3363,30 +3387,48 @@ impl State {
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
-        // The picker remains modal, but a left click on a preview selects that window. All other
-        // clicks are consumed so they cannot interact with the desktop behind the backdrop.
+        // The picker remains modal: left click selects a card (with Hero fly-back), switches HUD
+        // scope chips, or closes on empty backdrop; middle click closes a card's window directly.
         if self.niri.window_picker_ui.is_active() {
             if button_state == ButtonState::Pressed {
-                let selected = if button == Some(MouseButton::Left) {
-                    let location = pointer.current_location();
-                    self.niri
-                        .output_under(location)
-                        .and_then(|(output, pos_within_output)| {
-                            self.niri.window_picker_ui.window_under(
-                                &self.niri,
-                                output,
-                                pos_within_output,
-                            )
-                        })
-                } else {
-                    None
-                };
                 self.niri.suppressed_buttons.insert(button_code);
-                if let Some(id) = selected {
-                    if let Some(window) = self.niri.find_window_by_id(id) {
-                        self.niri.window_picker_ui.close();
-                        self.update_keyboard_focus();
-                        self.focus_window(&window);
+                let is_left = button == Some(MouseButton::Left);
+                let is_middle = button == Some(MouseButton::Middle);
+                if is_left || is_middle {
+                    let location = pointer.current_location();
+                    if let Some((output, pos_within_output)) = self.niri.output_under(location) {
+                        let output = output.clone();
+                        let result = self.niri.window_picker_ui.handle_click(
+                            &self.niri.layout,
+                            &output,
+                            pos_within_output,
+                            is_middle,
+                        );
+                        match result {
+                            WindowPickerClickResult::None => {}
+                            WindowPickerClickResult::SelectWindow(id) => {
+                                if let Some(window) = self.niri.find_window_by_id(id) {
+                                    self.update_keyboard_focus();
+                                    self.focus_window(&window);
+                                    self.niri
+                                        .window_picker_ui
+                                        .update_fly_back_target(&self.niri.layout, id);
+                                }
+                                self.niri.queue_redraw_all();
+                            }
+                            WindowPickerClickResult::CloseWindow(id) => {
+                                if let Some(window) = self.niri.find_window_by_id(id) {
+                                    if let Some(toplevel) = window.toplevel() {
+                                        toplevel.send_close();
+                                    }
+                                }
+                                self.niri.queue_redraw_all();
+                            }
+                            WindowPickerClickResult::CycleScope
+                            | WindowPickerClickResult::ClosePicker => {
+                                self.niri.queue_redraw_all();
+                            }
+                        }
                     }
                 }
                 return;
@@ -3744,6 +3786,20 @@ impl State {
         self.niri.cancel_interrupted_release_binds();
 
         if self.niri.window_picker_ui.is_active() {
+            let delta = event
+                .amount_v120(Axis::Vertical)
+                .or_else(|| event.amount(Axis::Vertical))
+                .or_else(|| event.amount_v120(Axis::Horizontal))
+                .or_else(|| event.amount(Axis::Horizontal))
+                .unwrap_or(0.0);
+            if delta.abs() > 0.5
+                && self
+                    .niri
+                    .window_picker_ui
+                    .handle_scroll(&self.niri.layout, delta > 0.0)
+            {
+                self.niri.queue_redraw_all();
+            }
             return;
         }
 

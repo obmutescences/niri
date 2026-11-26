@@ -65,7 +65,8 @@ pub use crate::utils::FloatOrInt;
 use crate::utils::{expand_home_path, Flag, MergeWith as _};
 pub use crate::window_picker::{WindowPicker, WindowPickerLabel};
 pub use crate::window_picker_card::{
-    WindowPickerCard, WindowPickerInfo, WindowPickerMotion, WindowPickerMotionStyle,
+    WindowPickerCard, WindowPickerGroupBy, WindowPickerInfo, WindowPickerLayout,
+    WindowPickerMotion, WindowPickerMotionStyle, WindowPickerScope,
 };
 pub use crate::window_rule::{
     FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
@@ -2461,6 +2462,8 @@ mod tests {
                     background_effect: BackgroundEffectRule {
                         xray: None,
                         blur: None,
+                        blur_passes: None,
+                        blur_offset: None,
                         noise: None,
                         saturation: None,
                         tint: None,
@@ -2472,6 +2475,8 @@ mod tests {
                         background_effect: BackgroundEffectRule {
                             xray: None,
                             blur: None,
+                            blur_passes: None,
+                            blur_offset: None,
                             noise: None,
                             saturation: None,
                             tint: None,
@@ -2520,6 +2525,8 @@ mod tests {
                     background_effect: BackgroundEffectRule {
                         xray: None,
                         blur: None,
+                        blur_passes: None,
+                        blur_offset: None,
                         noise: None,
                         saturation: None,
                         tint: None,
@@ -2531,6 +2538,8 @@ mod tests {
                         background_effect: BackgroundEffectRule {
                             xray: None,
                             blur: None,
+                            blur_passes: None,
+                            blur_offset: None,
                             noise: None,
                             saturation: None,
                             tint: None,
@@ -3121,9 +3130,13 @@ mod tests {
                 },
                 animation_ms_open: 180,
                 animation_ms_close: 180,
+                has_explicit_open_ms: false,
+                has_explicit_close_ms: false,
                 stagger_ms: 28,
                 animation: WindowPickerAnim {
+                    off: false,
                     kind: None,
+                    explicit_duration_ms: None,
                 },
                 selection: WindowPickerSelection {
                     focused_color: Color {
@@ -3139,6 +3152,7 @@ mod tests {
                         a: 1.0,
                     },
                     glow: true,
+                    glow_pulse: false,
                 },
                 card: WindowPickerCard {
                     on: true,
@@ -3176,10 +3190,23 @@ mod tests {
                         passes: 2,
                         offset: 2.0,
                     },
+                    tilt: true,
+                    glass_border: Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.16470589,
+                    },
+                    show_icons: true,
                 },
                 motion: WindowPickerMotion {
                     style: Slide,
                 },
+                layout: Grid,
+                group_by: None,
+                scope: All,
+                show_hud: true,
+                click_backdrop_to_close: true,
             },
             sounds: Sounds {
                 on: true,
@@ -3274,6 +3301,11 @@ mod tests {
 
         -                0.6666666666666666,
         +                0.66667,
+
+        -        has_explicit_open_ms: false,
+        -        has_explicit_close_ms: false,
+        +        has_explicit_open_ms: true,
+        +        has_explicit_close_ms: true,
         "#,
         );
     }

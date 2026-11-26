@@ -33,7 +33,10 @@ enum Kind {
     Easing {
         curve: Curve,
     },
-    Spring(Spring),
+    Spring {
+        spring: Spring,
+        time_scale: f64,
+    },
     Deceleration {
         initial_velocity: f64,
         deceleration_rate: f64,
@@ -125,14 +128,19 @@ impl Animation {
                 self.duration.as_millis() as u64,
                 curve,
             ),
-            Kind::Spring(spring) => {
+            Kind::Spring { spring, time_scale } => {
                 let spring = Spring {
                     from,
                     to,
                     initial_velocity: self.initial_velocity,
                     params: spring.params,
                 };
-                Self::spring(self.clock.clone(), spring)
+                let mut anim = Self::spring(self.clock.clone(), spring);
+                if (time_scale - 1.).abs() > f64::EPSILON && time_scale > 0. {
+                    let target = anim.duration.div_f64(time_scale);
+                    anim = anim.with_duration(target);
+                }
+                anim
             }
             Kind::Deceleration {
                 initial_velocity,
@@ -180,7 +188,10 @@ impl Animation {
 
         let duration = spring.duration();
         let clamped_duration = spring.clamped_duration().unwrap_or(duration);
-        let kind = Kind::Spring(spring);
+        let kind = Kind::Spring {
+            spring,
+            time_scale: 1.,
+        };
 
         Self {
             from: spring.from,
@@ -230,12 +241,107 @@ impl Animation {
         }
     }
 
+    /// Time-scales the animation (both Easing and Spring) so its full settling duration matches
+    /// `target` while preserving the exact spring bounce/overshoot shape.
+    pub fn with_duration(mut self, target: Duration) -> Self {
+        if self.is_off {
+            return self;
+        }
+        if target.is_zero() {
+            self.duration = Duration::ZERO;
+            self.clamped_duration = Duration::ZERO;
+            return self;
+        }
+        match &mut self.kind {
+            Kind::Easing { .. } => {
+                self.duration = target;
+                self.clamped_duration = target;
+            }
+            Kind::Spring { time_scale, .. } => {
+                if self.duration > Duration::ZERO && self.duration < Duration::MAX {
+                    let factor = self.duration.as_secs_f64() / target.as_secs_f64();
+                    if factor.is_finite() && factor > 0. {
+                        *time_scale *= factor;
+                        self.clamped_duration = self.clamped_duration.div_f64(factor).min(target);
+                        self.duration = target;
+                    }
+                }
+            }
+            Kind::Deceleration { .. } => {}
+        }
+        self
+    }
+
+    /// Time-scales the animation so its clamped duration (first reach of `to`) matches `target`.
+    /// Useful for closing animations that finish when `is_clamped_done()` becomes true.
+    pub fn with_clamped_duration(mut self, target: Duration) -> Self {
+        if self.is_off {
+            return self;
+        }
+        if target.is_zero() {
+            self.duration = Duration::ZERO;
+            self.clamped_duration = Duration::ZERO;
+            return self;
+        }
+        match &mut self.kind {
+            Kind::Easing { .. } => {
+                self.duration = target;
+                self.clamped_duration = target;
+            }
+            Kind::Spring { time_scale, .. } => {
+                let basis = if self.clamped_duration > Duration::ZERO
+                    && self.clamped_duration < Duration::MAX
+                {
+                    self.clamped_duration
+                } else {
+                    self.duration
+                };
+                if basis > Duration::ZERO && basis < Duration::MAX {
+                    let factor = basis.as_secs_f64() / target.as_secs_f64();
+                    if factor.is_finite() && factor > 0. {
+                        *time_scale *= factor;
+                        self.duration = self.duration.div_f64(factor).max(target);
+                        self.clamped_duration = target;
+                    }
+                }
+            }
+            Kind::Deceleration { .. } => {}
+        }
+        self
+    }
+
     pub fn is_done(&self) -> bool {
         if self.clock.should_complete_instantly() {
             return true;
         }
 
         self.clock.now() >= self.start_time + self.duration
+    }
+
+    pub fn is_done_with_delay(&self, delay: Duration) -> bool {
+        if self.clock.should_complete_instantly() {
+            return true;
+        }
+
+        self.clock.now()
+            >= self
+                .start_time
+                .saturating_add(delay)
+                .saturating_add(self.duration)
+    }
+
+    pub fn value_with_delay(&self, delay: Duration) -> f64 {
+        if self.clock.should_complete_instantly() {
+            return self.to;
+        }
+
+        let now = self.clock.now();
+        let effective_start = self.start_time.saturating_add(delay);
+        if now <= effective_start {
+            return self.from;
+        }
+
+        self.value_at(now.saturating_sub(delay))
     }
 
     pub fn is_clamped_done(&self) -> bool {
@@ -269,8 +375,8 @@ impl Animation {
                 let x = (passed / total).clamp(0., 1.);
                 curve.y(x) * (self.to - self.from) + self.from
             }
-            Kind::Spring(spring) => {
-                let value = spring.value_at(passed);
+            Kind::Spring { spring, time_scale } => {
+                let value = spring.value_at(passed.mul_f64(time_scale));
 
                 // Protect against numerical instability.
                 let range = (self.to - self.from) * 10.;
@@ -332,7 +438,7 @@ impl Animation {
         self.from += offset;
         self.to += offset;
 
-        if let Kind::Spring(spring) = &mut self.kind {
+        if let Kind::Spring { spring, .. } = &mut self.kind {
             spring.from += offset;
             spring.to += offset;
         }

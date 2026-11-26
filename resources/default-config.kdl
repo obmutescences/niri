@@ -422,6 +422,11 @@ window-picker {
     card {
         corner-radius 14
         shadow true
+        // Subtle 3D perspective tilt and specular glint when hovering a card.
+        // tilt true
+        // Render XDG application icons (with frosted monogram fallback) in the info strip.
+        // show-icons true
+        // glass-border "#ffffff2a"
 
         info {
             font "Sans"
@@ -436,8 +441,7 @@ window-picker {
             height 58
         }
 
-        // Per-card blur of the already blurred backdrop. Turn off on slower GPUs
-        // or at 4K; the translucent card fill remains usable without it.
+        // Live frosted-glass blur behind cards (also used by the top HUD bar and group headers).
         blur {
             on
             passes 2
@@ -446,12 +450,23 @@ window-picker {
     }
 
     // Entry/exit motion. All styles share animation-ms-open/close above.
-    // Styles: pop | slide | drop | burst | vortex | flip | cascade | orbit | wave | zoom | cycle.
-    // "cycle" walks the ten styles in order, one per card, continuing across openings.
-    // "random" is an alias.
+    // Styles: hero | pop | slide | drop | burst | vortex | flip | cascade | orbit | wave | zoom | cycle.
+    // "hero" flies windows smoothly from/back to their real desktop positions.
+    // "cycle" advances to the next style on each picker opening ("random" is an alias).
     motion {
         style "slide"
     }
+
+    // Packing layout: "grid" (uniform columns) or "justified" (equal-height masonry rows).
+    // layout "grid"
+    // Optional grouping: "none" | "workspace" | "output".
+    // group-by "none"
+    // Default collection scope (switchable live via Ctrl+Tab or HUD): "all" | "workspace" | "output".
+    // scope "all"
+    // Top glass HUD bar with scope chips, `/` live fuzzy search, and active full title.
+    // show-hud true
+    // Left-clicking empty backdrop space closes the picker.
+    // click-backdrop-to-close true
 
     // Stagger between consecutive previews flying in (milliseconds). 0 makes all
     // previews move as one. On close the order is reversed (last in, first out).
@@ -460,21 +475,20 @@ window-picker {
     // Easing/spring override for both open and close motion. Without this block the
     // durations above with an ease-out-cubic curve are used.
     // duration-ms 220 scales the whole motion; a spring replaces easing entirely and
-    // damping-ratio < 1 adds overshoot bounce.
+    // damping-ratio < 1 adds true overshoot bounce.
     // animation {
     //     duration-ms 220
-    //     curve ease-out-cubic            // linear | ease-out-quad | ease-out-expo
-    //     spring damping-ratio=0.65 stiffness=300 epsilon=0.0001
+    //     curve "ease-out-cubic"          // linear | ease-out-quad | ease-out-expo | cubic-bezier
+    //     spring damping-ratio=0.65 stiffness=320 epsilon=0.0001
     // }
 
-    // Highlight styling for the focused window and the hovered preview.
-    // The window that had focus when the picker opened gets an inverted letter
-    // label and a breathing accent glow; hovering a preview adds a stronger glow,
-    // a slight zoom and inverts its letter label. glow false disables both.
+    // Highlight styling for the focused window and the hovered/selected preview.
+    // glow-pulse defaults to false so the picker uses 0% GPU while idle.
     // selection {
     //     focused-color "#73dacaff"
     //     hover-color "#73dacaff"
     //     glow true
+    //     glow-pulse false
     // }
 }
 
@@ -503,6 +517,9 @@ window-picker {
 //     match app-id="^org.wezfurlong.wezterm$"
 //     background-effect {
 //         blur true
+//         // Optional per-rule blur override (automatically uses non-xray when different from global):
+//         // blur-passes 3
+//         // blur-offset 3.5
 //         saturation 1.15
 //         tint {
 //             from "#0b1a1fcc"
@@ -510,6 +527,7 @@ window-picker {
 //             angle 135
 //             mode "linear"
 //             opacity 0.55
+//             oklab true
 //             // linear mode only:
 //             // linear-size 0.2    // solid start color along 20% of the axis
 //             // linear-depth 0.8   // start color alpha multiplier
@@ -518,18 +536,26 @@ window-picker {
 //             // radial-depth 0.8   // center color alpha multiplier
 //         }
 //         liquid-glass {
-//             refraction-strength 20
-//             power-factor 1.5
-//             bevel-width 2.5
-//             bevel-px 18
-//             fringing 0.6
-//             interior-warp 0.18
+//             // One-line material presets: "liquid" | "frosted" | "crystal" | "acrylic" | "obsidian"
+//             // Any explicit field below overrides the preset.
+//             preset "liquid"
+//             physical-refraction true
+//             ior 1.48
+//             thickness 20
+//             bevel-clarity 0.78    // Clear sharp refraction in bevel + frosted interior
+//             dispersion 0.045      // Physical RGB chromatic dispersion
+//             adaptive-contrast true
+//             cursor-glow 0.25      // Interactive bevel glow near pointer
+//             focus-shimmer 0.45    // One-shot diagonal glass sheen sweep on focus gain
+//             refraction-strength 12
+//             bevel-px 20
+//             interior-warp 0.08
 //             rim-color "#ffffff"
-//             rim-strength 0.8
+//             rim-strength 0.9
 //             edge-lighting 1.0
-//             inner-shadow 0.15
+//             inner-shadow 0.16
 //             sheen-color "#ffffff"
-//             sheen-strength 0.25
+//             sheen-strength 0.18
 //         }
 //     }
 // }

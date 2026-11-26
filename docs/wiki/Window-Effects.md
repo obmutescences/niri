@@ -54,24 +54,29 @@ A `tint {}` block applies a two-color linear or radial gradient to the backgroun
 It works with plain blur as well as with `liquid-glass`, and it replaces the old trick of setting `border { width 0 }` together with `draw-border-with-background true` to color a translucent window.
 
 ```kdl
-background-effect {
-    blur true
+window-rule {
+    background-effect {
+        blur true
 
-    tint {
-        from "#0b1a1fcc"
-        to "#1f4a5acc"
-        angle 135
-        mode "linear"
-        opacity 0.55
-    }
+        tint {
+            from "#0b1a1fcc"
+            to "#1f4a5acc"
+            angle 135
+            mode "linear"
+            opacity 0.55
+            oklab true
+        }
 
-    liquid-glass {
-        refraction-strength 20
-        bevel-px 18
-        rim-color "#ffffff"
-        rim-strength 0.8
-        inner-shadow 0.15
-        sheen-strength 0.25
+        liquid-glass {
+            preset "liquid"
+            refraction-strength 20
+            bevel-px 18
+            bevel-clarity 0.65
+            rim-color "#ffffff"
+            rim-strength 0.8
+            inner-shadow 0.15
+            sheen-strength 0.25
+        }
     }
 }
 ```

@@ -1,9 +1,11 @@
+use knuffel::errors::DecodeError;
+
 use crate::utils::MergeWith;
 use crate::window_picker::{WindowPickerBlur, WindowPickerBlurPart};
 use crate::{Color, FloatOrInt};
 
 /// Entry animation style for the window picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WindowPickerMotionStyle {
     Pop,
     #[default]
@@ -16,7 +18,9 @@ pub enum WindowPickerMotionStyle {
     Orbit,
     Wave,
     Zoom,
-    /// Walk through all styles in order, one style per card.
+    /// Shared-element (Hero) transition from each window's real on-screen position.
+    Hero,
+    /// Cycle through all styles in order, advancing to the next style on each picker opening.
     Cycle,
 }
 
@@ -33,6 +37,7 @@ impl WindowPickerMotionStyle {
             "orbit" => Some(Self::Orbit),
             "wave" => Some(Self::Wave),
             "zoom" => Some(Self::Zoom),
+            "hero" => Some(Self::Hero),
             // "random" is kept as an alias so existing configs keep working.
             "cycle" | "random" => Some(Self::Cycle),
             _ => None,
@@ -40,23 +45,82 @@ impl WindowPickerMotionStyle {
     }
 }
 
+impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for WindowPickerMotionStyle {
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        _ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        match &**val {
+            knuffel::ast::Literal::String(s) => Self::from_name(s).ok_or_else(|| {
+                DecodeError::conversion(
+                    val,
+                    format!(
+                        "unknown window picker motion style `{s}`. Expected one of: \
+                         `pop`, `slide`, `drop`, `burst`, `vortex`, `flip`, `cascade`, \
+                         `orbit`, `wave`, `zoom`, `hero`, `cycle`."
+                    ),
+                )
+            }),
+            _ => Err(DecodeError::scalar_kind(knuffel::decode::Kind::String, val)),
+        }
+    }
+
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        if let Some(typ) = type_name {
+            ctx.emit_error(DecodeError::TypeName {
+                span: typ.span().clone(),
+                found: Some((**typ).clone()),
+                expected: knuffel::errors::ExpectedType::no_type(),
+                rust_type: stringify!(WindowPickerMotionStyle),
+            });
+        }
+    }
+}
+
+/// Grid packing strategy for the window picker.
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowPickerLayout {
+    #[default]
+    Grid,
+    Justified,
+}
+
+/// Optional grouping for window picker entries.
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowPickerGroupBy {
+    #[default]
+    None,
+    Workspace,
+    Output,
+}
+
+/// Default window collection scope when opening the picker.
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowPickerScope {
+    #[default]
+    All,
+    Workspace,
+    Output,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WindowPickerMotion {
     pub style: WindowPickerMotionStyle,
 }
 
-#[derive(knuffel::Decode, Debug, Default, Clone, PartialEq)]
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WindowPickerMotionPart {
     #[knuffel(child, unwrap(argument))]
-    pub style: Option<String>,
+    pub style: Option<WindowPickerMotionStyle>,
 }
 
 impl MergeWith<WindowPickerMotionPart> for WindowPickerMotion {
     fn merge_with(&mut self, part: &WindowPickerMotionPart) {
-        if let Some(style) = &part.style {
-            if let Some(style) = WindowPickerMotionStyle::from_name(style) {
-                self.style = style;
-            }
+        if let Some(style) = part.style {
+            self.style = style;
         }
     }
 }
@@ -145,6 +209,12 @@ pub struct WindowPickerCard {
     pub shadow: bool,
     pub info: WindowPickerInfo,
     pub blur: WindowPickerBlur,
+    /// Subtle 3D perspective tilt + specular glint following the pointer on hover.
+    pub tilt: bool,
+    /// 1px glass rim highlight color around cards.
+    pub glass_border: Color,
+    /// Render application icons (XDG PNG or monogram fallback) in the info strip.
+    pub show_icons: bool,
 }
 
 impl Default for WindowPickerCard {
@@ -159,6 +229,9 @@ impl Default for WindowPickerCard {
                 passes: 2,
                 offset: 2.,
             },
+            tilt: true,
+            glass_border: Color::from_rgba8_unpremul(255, 255, 255, 42),
+            show_icons: true,
         }
     }
 }
@@ -177,6 +250,12 @@ pub struct WindowPickerCardPart {
     pub info: Option<WindowPickerInfoPart>,
     #[knuffel(child)]
     pub blur: Option<WindowPickerBlurPart>,
+    #[knuffel(child, unwrap(argument))]
+    pub tilt: Option<bool>,
+    #[knuffel(child)]
+    pub glass_border: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub show_icons: Option<bool>,
 }
 
 impl MergeWith<WindowPickerCardPart> for WindowPickerCard {
@@ -187,9 +266,7 @@ impl MergeWith<WindowPickerCardPart> for WindowPickerCard {
         }
 
         merge!((self, part), corner_radius);
-        if let Some(shadow) = part.shadow {
-            self.shadow = shadow;
-        }
+        merge_clone!((self, part), shadow, tilt, glass_border, show_icons);
 
         if let Some(info) = &part.info {
             self.info.merge_with(info);

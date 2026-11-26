@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::mem;
 
 use anyhow::{ensure, Context as _};
@@ -13,6 +15,21 @@ use smithay::utils::{Buffer, Logical, Physical, Scale, Size, Transform};
 
 use crate::niri::OutputRenderElements;
 use crate::render_helpers::blur::{Blur, BlurOptions};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CustomBlurKey {
+    passes: u8,
+    offset_x100: i32,
+}
+
+impl CustomBlurKey {
+    fn from_options(options: BlurOptions) -> Self {
+        Self {
+            passes: options.passes,
+            offset_x100: (options.offset * 100.0).round() as i32,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct EffectBuffer {
@@ -32,6 +49,9 @@ pub struct EffectBuffer {
     offscreen: Option<Offscreen>,
     /// Blurring program, if available.
     blur: Option<Blur>,
+    /// Per-override cached blurred textures so XRay windows with custom `blur-passes` /
+    /// `blur-offset` render at full XRay speed without re-blurring static wallpapers.
+    custom_blurs: HashMap<CustomBlurKey, (Blur, Option<GlesTexture>)>,
 
     /// Commit counter that takes into account both original and blurred texture changes.
     commit_counter: CommitCounter,
@@ -82,6 +102,7 @@ impl EffectBuffer {
             elements: Elements::default(),
             offscreen: None,
             blur: None,
+            custom_blurs: HashMap::new(),
             commit_counter: CommitCounter::default(),
         }
     }
@@ -139,14 +160,28 @@ impl EffectBuffer {
         elements
     }
 
+    fn invalidate_custom_blurs(&mut self) {
+        for (_, cached) in self.custom_blurs.values_mut() {
+            *cached = None;
+        }
+    }
+
     pub fn prepare(&mut self, renderer: &mut GlesRenderer, blur: bool) -> bool {
+        self.prepare_with_blur(renderer, blur.then_some(self.blur_options))
+    }
+
+    pub fn prepare_with_blur(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        blur_options: Option<BlurOptions>,
+    ) -> bool {
         if let Err(err) = self.prepare_offscreen(renderer) {
             warn!("error preparing offscreen: {err:?}");
             return false;
         };
 
-        if blur {
-            if let Err(err) = self.prepare_blur(renderer) {
+        if let Some(opts) = blur_options.filter(|o| o.passes > 0 && o.offset > 0.0) {
+            if let Err(err) = self.prepare_blur_with(renderer, opts) {
                 warn!("error preparing blur: {err:?}");
                 return false;
             }
@@ -189,6 +224,10 @@ impl EffectBuffer {
             reason = "first render";
         }
 
+        if self.offscreen.is_none() {
+            self.invalidate_custom_blurs();
+        }
+
         let offscreen = if let Some(offscreen) = &mut self.offscreen {
             offscreen
         } else {
@@ -215,6 +254,7 @@ impl EffectBuffer {
 
         // Recreate the damage tracker if the scale changes. We already recreate it for buffer size
         // changes, and transform is always Normal.
+        let mut invalidated_blur = false;
         if offscreen.scale != self.scale {
             offscreen.scale = self.scale;
 
@@ -224,6 +264,7 @@ impl EffectBuffer {
 
             self.commit_counter.increment();
             offscreen.blurred = None;
+            invalidated_blur = true;
         }
 
         // Render the elements if any.
@@ -232,6 +273,9 @@ impl EffectBuffer {
             x @ Elements::Unchanged(_) => {
                 // No redrawing necessary.
                 self.elements = x;
+                if invalidated_blur {
+                    self.invalidate_custom_blurs();
+                }
                 return Ok(());
             }
         };
@@ -253,73 +297,156 @@ impl EffectBuffer {
 
             // Original texture changed; reset the blurred texture.
             offscreen.blurred = None;
+            invalidated_blur = true;
         }
 
         // Clear and put the storage back.
         elements.clear();
         self.elements = Elements::Unchanged(elements);
 
+        if invalidated_blur {
+            self.invalidate_custom_blurs();
+        }
+
         Ok(())
     }
 
-    fn prepare_blur(&mut self, renderer: &mut GlesRenderer) -> anyhow::Result<()> {
+    fn prepare_blur_with(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        options: BlurOptions,
+    ) -> anyhow::Result<()> {
         let offscreen = self.offscreen.as_mut().context("missing offscreen")?;
-        if offscreen.blurred.is_some() {
-            // Already rendered.
-            return Ok(());
-        }
-
-        if let Some(blur) = &self.blur {
-            if blur.context_id() != renderer.context_id() {
-                debug!("recreating blur: renderer changed");
-                self.blur = None;
-            }
-        }
-
-        let blur = if let Some(blur) = &mut self.blur {
-            blur
-        } else {
-            let Some(blur) = Blur::new(renderer) else {
-                // Missing blur shader.
-                return Ok(());
-            };
-            self.blur.insert(blur)
-        };
-
         ensure!(
             offscreen.renderer_context_id == renderer.context_id(),
             "wrong renderer context id"
         );
 
+        let is_default = options == self.blur_options;
+        if is_default {
+            if offscreen.blurred.is_some() {
+                // Already rendered.
+                return Ok(());
+            }
+
+            if let Some(blur) = &self.blur {
+                if blur.context_id() != renderer.context_id() {
+                    debug!("recreating blur: renderer changed");
+                    self.blur = None;
+                }
+            }
+
+            let blur = if let Some(blur) = &mut self.blur {
+                blur
+            } else {
+                let Some(blur) = Blur::new(renderer) else {
+                    // Missing blur shader.
+                    return Ok(());
+                };
+                self.blur.insert(blur)
+            };
+
+            blur.prepare_textures(
+                |fourcc, size| renderer.create_buffer(fourcc, size),
+                &offscreen.texture,
+                self.blur_options,
+            )
+            .context("error preparing blur textures")?;
+
+            return Ok(());
+        }
+
+        let key = CustomBlurKey::from_options(options);
+        if let Some((blur, cached)) = self.custom_blurs.get(&key) {
+            if blur.context_id() == renderer.context_id() && cached.is_some() {
+                return Ok(());
+            }
+        }
+
+        if self
+            .custom_blurs
+            .get(&key)
+            .is_some_and(|(blur, _)| blur.context_id() != renderer.context_id())
+        {
+            self.custom_blurs.remove(&key);
+        }
+
+        if self.custom_blurs.len() >= 8 && !self.custom_blurs.contains_key(&key) {
+            self.custom_blurs.clear();
+        }
+
+        let (blur, cached) = match self.custom_blurs.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let Some(blur) = Blur::new(renderer) else {
+                    return Ok(());
+                };
+                entry.insert((blur, None))
+            }
+        };
+        *cached = None;
         blur.prepare_textures(
             |fourcc, size| renderer.create_buffer(fourcc, size),
             &offscreen.texture,
-            self.blur_options,
+            options,
         )
-        .context("error preparing blur textures")?;
+        .context("error preparing custom blur textures")?;
 
         Ok(())
     }
 
     pub fn render(&mut self, frame: &mut GlesFrame, blur: bool) -> anyhow::Result<GlesTexture> {
+        self.render_pair_with_blur(frame, blur.then_some(self.blur_options))
+            .map(|(tex, _)| tex)
+    }
+
+    /// Returns `(primary_texture, optional_sharp_texture)`.
+    /// When `blur_options` has positive `passes` and `offset`, `primary_texture` is blurred with
+    /// those exact settings and `optional_sharp_texture` holds the original crisp offscreen buffer
+    /// for dual-texture Liquid Glass bevel clarity.
+    pub fn render_pair_with_blur(
+        &mut self,
+        frame: &mut GlesFrame,
+        blur_options: Option<BlurOptions>,
+    ) -> anyhow::Result<(GlesTexture, Option<GlesTexture>)> {
         let offscreen = self.offscreen.as_mut().context("offscreen is missing")?;
 
-        if !blur {
-            return Ok(offscreen.texture.clone());
+        let Some(options) = blur_options.filter(|o| o.passes > 0 && o.offset > 0.0) else {
+            return Ok((offscreen.texture.clone(), None));
+        };
+
+        let sharp = offscreen.texture.clone();
+        if options == self.blur_options {
+            let texture = if let Some(texture) = &offscreen.blurred {
+                texture.clone()
+            } else {
+                let blur = self.blur.as_mut().context("blur is missing")?;
+                let mut guard = frame.renderer();
+                let renderer = guard.as_mut();
+                let blurred = blur
+                    .render(renderer, &offscreen.texture, self.blur_options)
+                    .context("error rendering blur")?;
+                offscreen.blurred.insert(blurred).clone()
+            };
+            return Ok((texture, Some(sharp)));
         }
 
-        let texture = if let Some(texture) = &offscreen.blurred {
+        let key = CustomBlurKey::from_options(options);
+        let (blur, cached) = self
+            .custom_blurs
+            .get_mut(&key)
+            .context("custom blur is missing")?;
+        let texture = if let Some(texture) = cached {
             texture.clone()
         } else {
-            let blur = self.blur.as_mut().context("blur is missing")?;
             let mut guard = frame.renderer();
             let renderer = guard.as_mut();
             let blurred = blur
-                .render(renderer, &offscreen.texture, self.blur_options)
-                .context("error rendering blur")?;
-            offscreen.blurred.insert(blurred).clone()
+                .render(renderer, &offscreen.texture, options)
+                .context("error rendering custom blur")?;
+            cached.insert(blurred).clone()
         };
 
-        Ok(texture)
+        Ok((texture, Some(sharp)))
     }
 }

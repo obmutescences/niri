@@ -1252,14 +1252,17 @@ impl State {
         let pointer = &self.niri.seat.get_pointer().unwrap();
         let location = pointer.current_location();
 
-        // Track which picker preview the cursor is over, for the hover highlight ring.
+        // Track which picker preview the cursor is over, plus card-local 3D tilt.
         if self.niri.window_picker_ui.is_active() {
-            let hover = self.niri.output_under(location).and_then(|(output, pos)| {
+            let changed = if let Some((output, pos)) = self.niri.output_under(location) {
+                let output = output.clone();
                 self.niri
                     .window_picker_ui
-                    .window_under(&self.niri, output, pos)
-            });
-            if self.niri.window_picker_ui.set_hover(hover) {
+                    .pointer_motion(&self.niri.layout, &output, pos)
+            } else {
+                self.niri.window_picker_ui.set_hover(None)
+            };
+            if changed {
                 self.niri.queue_redraw_all();
             }
         }
@@ -4738,12 +4741,19 @@ impl Niri {
 
     // Updates only those render elements that go in the xray buffer.
     pub fn update_xray_render_elements(&mut self, output: Option<&Output>) {
+        let pointer_loc = self.seat.get_pointer().map(|p| p.current_location());
         for (out, state) in self.output_state.iter_mut() {
             if output.is_none_or(|output| out == output) {
                 let scale = Scale::from(out.current_scale().fractional_scale());
                 let mode = out.current_mode().unwrap();
                 let transform = out.current_transform();
                 let size = transform.transform_size(mode.size);
+
+                state.xray.pointer_pos = pointer_loc.and_then(|loc| {
+                    let geo = self.global_space.output_geometry(out)?;
+                    let pos = loc - geo.loc.to_f64();
+                    Some(pos)
+                });
 
                 state.xray.workspaces.clear();
                 let mon = self.layout.monitor_for_output(out).unwrap();

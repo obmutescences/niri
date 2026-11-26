@@ -14,6 +14,8 @@ pub struct Shaders {
     pub border: Option<ShaderProgram>,
     pub shadow: Option<ShaderProgram>,
     pub picker_card: Option<ShaderProgram>,
+    pub picker_glass: Option<ShaderProgram>,
+    pub picker_blur: Option<GlesTexProgram>,
     pub clipped_surface: Option<GlesTexProgram>,
     pub postprocess_and_clip: Option<GlesTexProgram>,
     pub resize: Option<ShaderProgram>,
@@ -29,6 +31,7 @@ pub enum ProgramType {
     Border,
     Shadow,
     PickerCard,
+    PickerGlass,
     Resize,
     Close,
     Open,
@@ -92,10 +95,17 @@ impl Shaders {
             include_str!("picker_card.frag"),
             &[
                 UniformName::new("src_size", UniformType::_2f),
+                UniformName::new("tex_size", UniformType::_2f),
+                UniformName::new("src_pivot", UniformType::_2f),
                 UniformName::new("dest_size", UniformType::_2f),
-                UniformName::new("src_center", UniformType::_2f),
+                UniformName::new("dest_center", UniformType::_2f),
+                UniformName::new("persp_half_size", UniformType::_2f),
+                UniformName::new("card_half_size", UniformType::_2f),
                 UniformName::new("angle", UniformType::_1f),
                 UniformName::new("card_scale", UniformType::_1f),
+                UniformName::new("tilt", UniformType::_2f),
+                UniformName::new("flip_y", UniformType::_1f),
+                UniformName::new("glint_strength", UniformType::_1f),
             ],
             &["tex"],
         )
@@ -104,42 +114,62 @@ impl Shaders {
         })
         .ok();
 
+        let picker_blur = renderer
+            .compile_custom_texture_shader(
+                include_str!("picker_blur.frag"),
+                &[
+                    UniformName::new("niri_scale", UniformType::_1f),
+                    UniformName::new("geo_size", UniformType::_2f),
+                    UniformName::new("corner_radius", UniformType::_4f),
+                    UniformName::new("input_to_geo", UniformType::Matrix3x3),
+                    UniformName::new("pb_card_size", UniformType::_2f),
+                    UniformName::new("pb_dest_center", UniformType::_2f),
+                    UniformName::new("pb_persp_half_size", UniformType::_2f),
+                    UniformName::new("pb_angle", UniformType::_1f),
+                    UniformName::new("pb_card_scale", UniformType::_1f),
+                    UniformName::new("pb_tilt", UniformType::_2f),
+                    UniformName::new("pb_flip_y", UniformType::_1f),
+                ],
+            )
+            .map_err(|err| {
+                warn!("error compiling picker blur shader: {err:?}");
+            })
+            .ok();
+
+        let picker_glass = ShaderProgram::compile(
+            renderer,
+            concat!(
+                include_str!("picker_glass.frag"),
+                include_str!("rounding_alpha.frag")
+            ),
+            &[
+                UniformName::new("geo_size", UniformType::_2f),
+                UniformName::new("corner_radius", UniformType::_4f),
+                UniformName::new("fill_color", UniformType::_4f),
+                UniformName::new("border_color", UniformType::_4f),
+                UniformName::new("accent_color", UniformType::_4f),
+                UniformName::new("highlight", UniformType::_1f),
+                UniformName::new("divider_y", UniformType::_1f),
+                UniformName::new("scrim_alpha", UniformType::_1f),
+            ],
+            &[],
+        )
+        .map_err(|err| {
+            warn!("error compiling picker glass shader: {err:?}");
+        })
+        .ok();
+
         let clipped_surface = renderer
             .compile_custom_texture_shader(
                 concat!(
                     include_str!("clipped_surface.frag"),
                     include_str!("rounding_alpha.frag"),
-                    "\nvec4 postprocess(vec4 color) { return color; }",
                 ),
                 &[
                     UniformName::new("niri_scale", UniformType::_1f),
                     UniformName::new("geo_size", UniformType::_2f),
                     UniformName::new("corner_radius", UniformType::_4f),
                     UniformName::new("input_to_geo", UniformType::Matrix3x3),
-                    UniformName::new("tint_from", UniformType::_4f),
-                    UniformName::new("tint_to", UniformType::_4f),
-                    UniformName::new("tint_angle", UniformType::_1f),
-                    UniformName::new("tint_mode", UniformType::_1f),
-                    UniformName::new("tint_opacity", UniformType::_1f),
-                    UniformName::new("tint_linear_size", UniformType::_1f),
-                    UniformName::new("tint_linear_depth", UniformType::_1f),
-                    UniformName::new("tint_radial_size", UniformType::_1f),
-                    UniformName::new("tint_radial_depth", UniformType::_1f),
-                    UniformName::new("lg_refraction_strength", UniformType::_1f),
-                    UniformName::new("lg_power_factor", UniformType::_1f),
-                    UniformName::new("lg_refraction_power", UniformType::_1f),
-                    UniformName::new("lg_physical_refraction", UniformType::_1f),
-                    UniformName::new("lg_glow_weight", UniformType::_1f),
-                    UniformName::new("lg_edge_lighting", UniformType::_1f),
-                    UniformName::new("lg_fringing", UniformType::_1f),
-                    UniformName::new("lg_bevel_width", UniformType::_1f),
-                    UniformName::new("lg_bevel_px", UniformType::_1f),
-                    UniformName::new("lg_interior_warp", UniformType::_1f),
-                    UniformName::new("lg_rim_color", UniformType::_4f),
-                    UniformName::new("lg_rim_strength", UniformType::_1f),
-                    UniformName::new("lg_inner_shadow", UniformType::_1f),
-                    UniformName::new("lg_sheen_color", UniformType::_4f),
-                    UniformName::new("lg_sheen_strength", UniformType::_1f),
                 ],
             )
             .map_err(|err| {
@@ -150,15 +180,17 @@ impl Shaders {
         let postprocess_and_clip = renderer
             .compile_custom_texture_shader(
                 concat!(
-                    include_str!("clipped_surface.frag"),
+                    include_str!("glass_background.frag"),
                     include_str!("rounding_alpha.frag"),
-                    include_str!("postprocess.frag"),
                 ),
                 &[
                     UniformName::new("niri_scale", UniformType::_1f),
                     UniformName::new("geo_size", UniformType::_2f),
                     UniformName::new("corner_radius", UniformType::_4f),
                     UniformName::new("input_to_geo", UniformType::Matrix3x3),
+                    UniformName::new("geo_to_tex_linear", UniformType::_4f),
+                    UniformName::new("tex_sharp", UniformType::_1i),
+                    UniformName::new("has_sharp_tex", UniformType::_1f),
                     UniformName::new("noise", UniformType::_1f),
                     UniformName::new("saturation", UniformType::_1f),
                     UniformName::new("bg_color", UniformType::_4f),
@@ -171,6 +203,8 @@ impl Shaders {
                     UniformName::new("tint_linear_depth", UniformType::_1f),
                     UniformName::new("tint_radial_size", UniformType::_1f),
                     UniformName::new("tint_radial_depth", UniformType::_1f),
+                    UniformName::new("tint_oklab", UniformType::_1f),
+                    UniformName::new("lg_enabled", UniformType::_1f),
                     UniformName::new("lg_refraction_strength", UniformType::_1f),
                     UniformName::new("lg_power_factor", UniformType::_1f),
                     UniformName::new("lg_refraction_power", UniformType::_1f),
@@ -186,6 +220,15 @@ impl Shaders {
                     UniformName::new("lg_inner_shadow", UniformType::_1f),
                     UniformName::new("lg_sheen_color", UniformType::_4f),
                     UniformName::new("lg_sheen_strength", UniformType::_1f),
+                    UniformName::new("lg_ior", UniformType::_1f),
+                    UniformName::new("lg_thickness", UniformType::_1f),
+                    UniformName::new("lg_bevel_clarity", UniformType::_1f),
+                    UniformName::new("lg_dispersion", UniformType::_1f),
+                    UniformName::new("lg_adaptive_contrast", UniformType::_1f),
+                    UniformName::new("lg_cursor_glow", UniformType::_1f),
+                    UniformName::new("lg_cursor_pos", UniformType::_2f),
+                    UniformName::new("lg_focus_shimmer", UniformType::_1f),
+                    UniformName::new("lg_focus_progress", UniformType::_1f),
                 ],
             )
             .map_err(|err| {
@@ -219,6 +262,8 @@ impl Shaders {
             border,
             shadow,
             picker_card,
+            picker_glass,
+            picker_blur,
             clipped_surface,
             postprocess_and_clip,
             resize,
@@ -269,6 +314,7 @@ impl Shaders {
             ProgramType::Border => self.border.clone(),
             ProgramType::Shadow => self.shadow.clone(),
             ProgramType::PickerCard => self.picker_card.clone(),
+            ProgramType::PickerGlass => self.picker_glass.clone(),
             ProgramType::Resize => self
                 .custom_resize
                 .borrow()

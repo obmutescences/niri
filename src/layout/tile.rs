@@ -108,6 +108,9 @@ pub struct Tile<W: LayoutElement> {
     /// State machine for focus animations.
     focus_animation_state: FocusAnimationState,
 
+    /// One-shot diagonal glass shimmer animation triggered on focus gain.
+    glass_shimmer_animation: Option<Animation>,
+
     /// Offset during the initial interactive move rubberband.
     pub(super) interactive_move_offset: Point<f64, Logical>,
 
@@ -247,6 +250,7 @@ impl<W: LayoutElement> Tile<W> {
             scale_animation: None,
             was_focused: false,
             focus_animation_state: FocusAnimationState::Idle,
+            glass_shimmer_animation: None,
             interactive_move_offset: Point::from((0., 0.)),
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
@@ -485,6 +489,12 @@ impl<W: LayoutElement> Tile<W> {
             }
         }
 
+        if let Some(shimmer) = &self.glass_shimmer_animation {
+            if shimmer.is_done() {
+                self.glass_shimmer_animation = None;
+            }
+        }
+
         self.advance_focus_animation();
     }
 
@@ -506,6 +516,7 @@ impl<W: LayoutElement> Tile<W> {
                 .as_ref()
                 .is_some_and(|scale| !scale.anim.is_done())
             || !matches!(self.focus_animation_state, FocusAnimationState::Idle)
+            || self.glass_shimmer_animation.is_some()
     }
 
     pub fn is_moving_between_workspaces(&self) -> bool {
@@ -814,6 +825,11 @@ impl<W: LayoutElement> Tile<W> {
         // `was_focused` frozen so closing that UI does not re-trigger the flash on the same window.
         // Still advance an already-running animation, otherwise it could get stuck mid-flash.
         if !layout_has_keyboard_focus {
+            if let Some(shimmer) = &self.glass_shimmer_animation {
+                if shimmer.is_done() {
+                    self.glass_shimmer_animation = None;
+                }
+            }
             if matches!(
                 self.focus_animation_state,
                 FocusAnimationState::Flashing { .. }
@@ -821,6 +837,26 @@ impl<W: LayoutElement> Tile<W> {
                 self.advance_focus_animation();
             }
             return;
+        }
+
+        // Trigger one-shot liquid glass focus shimmer on focus gain when configured.
+        if is_focused
+            && !self.was_focused
+            && self
+                .window
+                .rules()
+                .background_effect
+                .liquid_glass
+                .is_some_and(|lg| lg.focus_shimmer > 0.0)
+        {
+            self.glass_shimmer_animation = Some(Animation::ease(
+                self.clock.clone(),
+                0.,
+                1.,
+                0.,
+                280,
+                crate::animation::Curve::EaseOutCubic,
+            ));
         }
 
         let focus_config = &layout_config.focus_animation;
@@ -1538,6 +1574,10 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         let surface_anim_scale = animated_window_size / window_size;
+        let focus_shimmer_progress = self
+            .glass_shimmer_animation
+            .as_ref()
+            .map_or(0.0, |a| a.clamped_value() as f32);
         self.window.render_background_effect(
             ctx.as_gles(),
             area,
@@ -1547,6 +1587,7 @@ impl<W: LayoutElement> Tile<W> {
             radius,
             xray_pos,
             force_background_xray,
+            focus_shimmer_progress,
             &mut |elem| push(elem.into()),
         );
     }

@@ -256,6 +256,7 @@ impl MappedLayer {
             false,
             should_block_out,
             xray_pos,
+            0.,
             &mut |elem| push(elem.into()),
         );
     }
@@ -330,6 +331,7 @@ impl MappedLayer {
                 false,
                 false,
                 xray_pos,
+                0.,
                 &mut |elem| push(elem.into()),
             );
         }

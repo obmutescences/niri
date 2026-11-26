@@ -30,11 +30,15 @@ pub struct BackgroundEffect {
     corner_radius: CornerRadius,
     blur_config: niri_config::Blur,
     options: Options,
+    last_cursor_pos: Option<[f32; 2]>,
+    last_focus_progress: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Options {
     pub blur: bool,
+    pub blur_passes: Option<u8>,
+    pub blur_offset: Option<f64>,
     pub xray: bool,
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
@@ -95,6 +99,44 @@ impl BackgroundEffect {
             corner_radius: CornerRadius::default(),
             blur_config: niri_config::Blur::default(),
             options: Options::default(),
+            last_cursor_pos: None,
+            last_focus_progress: 0.,
+        }
+    }
+
+    pub fn update_interactive_state(
+        &mut self,
+        cursor_pos_px: Option<[f32; 2]>,
+        focus_progress: f32,
+    ) {
+        let mut changed = false;
+        if self
+            .options
+            .liquid_glass
+            .is_some_and(|lg| lg.cursor_glow > 0.0)
+        {
+            let cursor_moved = match (self.last_cursor_pos, cursor_pos_px) {
+                (Some([ax, ay]), Some([bx, by])) => (ax - bx).hypot(ay - by) > 0.75,
+                (None, None) => false,
+                _ => true,
+            };
+            if cursor_moved {
+                self.last_cursor_pos = cursor_pos_px;
+                changed = true;
+            }
+        }
+        if self
+            .options
+            .liquid_glass
+            .is_some_and(|lg| lg.focus_shimmer > 0.0)
+            && (self.last_focus_progress - focus_progress).abs() > 1e-4
+        {
+            self.last_focus_progress = focus_progress;
+            changed = true;
+        }
+        if changed {
+            self.damage.damage_all();
+            self.nonxray.damage();
         }
     }
 
@@ -132,6 +174,8 @@ impl BackgroundEffect {
 
         let mut options = Options {
             blur,
+            blur_passes: effect.blur_passes,
+            blur_offset: effect.blur_offset,
             xray: effect.xray == Some(true),
             noise: effect.noise,
             saturation: effect.saturation,
@@ -140,7 +184,7 @@ impl BackgroundEffect {
         };
 
         // If we have some background effect but xray wasn't explicitly set, default it to true
-        // since it's cheaper.
+        // since it's cheaper (XRay natively supports per-rule blur-passes/blur-offset caching).
         if options.is_visible() && effect.xray.is_none() {
             options.xray = true;
         }
@@ -163,8 +207,21 @@ impl BackgroundEffect {
         &self,
         ctx: RenderCtx<GlesRenderer>,
         ns: Option<usize>,
+        params: RenderParams,
+        xray_pos: XrayPos,
+        push: &mut dyn FnMut(BackgroundEffectElement),
+    ) {
+        self.render_interactive(ctx, ns, params, xray_pos, None, 0., push);
+    }
+
+    pub fn render_interactive(
+        &self,
+        ctx: RenderCtx<GlesRenderer>,
+        ns: Option<usize>,
         mut params: RenderParams,
         xray_pos: XrayPos,
+        cursor_pos_px: Option<[f32; 2]>,
+        focus_progress: f32,
         push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
         if !self.is_visible() {
@@ -179,9 +236,17 @@ impl BackgroundEffect {
         let damage = self.damage.render(params.geometry);
 
         // Use noise/saturation from options, falling back to blur defaults if blurred, and
-        // to no effect if not blurred.
-        let blur = self.options.blur && !self.blur_config.off;
-        let blur_options = blur.then_some(BlurOptions::from(self.blur_config));
+        // to no effect if not blurred. `blur-passes 0` or `blur-offset 0` cleanly disables blur.
+        let effective_passes = self.options.blur_passes.unwrap_or(self.blur_config.passes);
+        let effective_offset = self.options.blur_offset.unwrap_or(self.blur_config.offset);
+        let blur = self.options.blur
+            && !self.blur_config.off
+            && effective_passes > 0
+            && effective_offset > 0.0;
+        let blur_options = blur.then_some(BlurOptions {
+            passes: effective_passes,
+            offset: effective_offset,
+        });
         let noise = if blur { self.blur_config.noise } else { 0. };
         let noise = self.options.noise.unwrap_or(noise) as f32;
         let saturation = if blur {
@@ -201,16 +266,18 @@ impl BackgroundEffect {
                 ctx,
                 params,
                 xray_pos,
-                blur,
+                blur_options,
                 noise,
                 saturation,
                 self.options.tint,
                 self.options.liquid_glass,
+                cursor_pos_px,
+                focus_progress,
                 &mut |elem| push(elem.into()),
             );
         } else {
             // Render non-xray effect.
-            let elem = self.nonxray.render(
+            let elem = self.nonxray.render_interactive(
                 ns,
                 params,
                 blur_options,
@@ -218,6 +285,8 @@ impl BackgroundEffect {
                 saturation,
                 self.options.tint,
                 self.options.liquid_glass,
+                cursor_pos_px,
+                focus_progress,
             );
             push(elem.into());
         }
@@ -294,6 +363,7 @@ fn effect_options_are_visible(
         || blur
         || effect.noise.is_some_and(|x| x > 0.)
         || effect.saturation.is_some_and(|x| x != 1.)
+        || effect.tint.is_some_and(|x| x.is_visible())
         || effect.liquid_glass.is_some()
 }
 
@@ -329,6 +399,7 @@ pub fn render_for_tile(
     force_xray: bool,
     should_block_out: bool,
     xray_pos: XrayPos,
+    focus_progress: f32,
     push: &mut dyn FnMut(BackgroundEffectElement),
 ) {
     with_states(surface, |states| {
@@ -370,6 +441,22 @@ pub fn render_for_tile(
         };
 
         let xray_pos = xray_pos.offset(params.geometry.loc - geometry.loc);
-        background_effect.render(ctx, ns, params, xray_pos, push);
+
+        // Compute pointer position in window-local logical pixels for interactive glass bevel glow.
+        let cursor_pos_px = ctx.xray.and_then(|x| x.pointer_pos).map(|ptr| {
+            let win_origin = xray_pos.pos_in_backdrop.upscale(xray_pos.zoom);
+            let local = (ptr - win_origin).downscale(xray_pos.zoom.max(1e-4));
+            [local.x as f32, local.y as f32]
+        });
+        background_effect.update_interactive_state(cursor_pos_px, focus_progress);
+        background_effect.render_interactive(
+            ctx,
+            ns,
+            params,
+            xray_pos,
+            cursor_pos_px,
+            focus_progress,
+            push,
+        );
     });
 }

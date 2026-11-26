@@ -3,7 +3,8 @@ use knuffel::errors::DecodeError;
 use crate::animations::{Animation, Curve, EasingParams, Kind as AnimKind, SpringParams};
 use crate::utils::{expect_only_children, parse_arg_node, MergeWith};
 use crate::window_picker_card::{
-    WindowPickerCard, WindowPickerCardPart, WindowPickerMotion, WindowPickerMotionPart,
+    WindowPickerCard, WindowPickerCardPart, WindowPickerGroupBy, WindowPickerLayout,
+    WindowPickerMotion, WindowPickerMotionPart, WindowPickerScope,
 };
 use crate::{Color, FloatOrInt};
 
@@ -13,36 +14,54 @@ use crate::{Color, FloatOrInt};
 /// window-picker {
 ///     animation {
 ///         duration-ms 220
-///         curve ease-out-cubic
-///         // or: spring damping-ratio=0.6 stiffness=320 epsilon=0.0001
+///         curve "ease-out-cubic"
+///         // or: curve "cubic-bezier" 0.22 1.0 0.36 1.0
+///         // or: spring damping-ratio=0.65 stiffness=320 epsilon=0.0001
+///         // or: off
 ///     }
 /// }
 /// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct WindowPickerAnim {
+    pub off: bool,
     /// `None`: legacy ease-out-cubic with the per-direction `animation-ms-*` durations.
     pub kind: Option<AnimKind>,
+    /// Explicit `duration-ms` set inside `animation {}` (applies to both easing and spring).
+    pub explicit_duration_ms: Option<u16>,
 }
 
 impl WindowPickerAnim {
-    /// Build a concrete `Animation` config, falling back to ease-out-cubic with the given
-    /// per-direction default duration (matching the legacy fixed behavior).
+    /// Build a concrete `Animation` config, falling back to `fallback_duration_ms` when
+    /// `duration-ms` was not explicitly overridden inside `animation {}`.
     pub fn to_animation(&self, fallback_duration_ms: u16) -> Animation {
-        let kind = self.kind.unwrap_or_else(|| {
-            AnimKind::Easing(EasingParams {
+        if self.off {
+            return Animation::new_off();
+        }
+        let kind = match self.kind {
+            Some(AnimKind::Spring(s)) => AnimKind::Spring(s),
+            Some(AnimKind::Easing(mut e)) => {
+                e.duration_ms = u32::from(
+                    self.explicit_duration_ms
+                        .unwrap_or(fallback_duration_ms)
+                        .max(1),
+                );
+                AnimKind::Easing(e)
+            }
+            None => AnimKind::Easing(EasingParams {
                 duration_ms: u32::from(fallback_duration_ms.max(1)),
                 curve: Curve::EaseOutCubic,
-            })
-        });
+            }),
+        };
         Animation { off: false, kind }
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct WindowPickerAnimPart {
+    pub off: bool,
     pub duration_ms: Option<u16>,
     pub spring: Option<WindowPickerSpringPart>,
-    pub curve: Option<String>,
+    pub curve: Option<Curve>,
 }
 
 impl<S> knuffel::Decode<S> for WindowPickerAnimPart
@@ -60,6 +79,10 @@ where
 
         for child in node.children() {
             match &**child.node_name {
+                "off" => {
+                    knuffel::decode::check_flag_node(child, ctx);
+                    part.off = true;
+                }
                 "duration-ms" => {
                     part.duration_ms = Some(parse_arg_node("duration-ms", child, ctx)?);
                 }
@@ -68,7 +91,49 @@ where
                     let val = iter_args.next().ok_or_else(|| {
                         DecodeError::missing(child, "additional argument `curve` is required")
                     })?;
-                    part.curve = Some(DecodeScalar::decode(val, ctx)?);
+                    let curve_name: String = DecodeScalar::decode(val, ctx)?;
+                    let curve = match curve_name.as_str() {
+                        "linear" => Some(Curve::Linear),
+                        "ease-out-quad" => Some(Curve::EaseOutQuad),
+                        "ease-out-cubic" => Some(Curve::EaseOutCubic),
+                        "ease-out-expo" => Some(Curve::EaseOutExpo),
+                        "cubic-bezier" => {
+                            let val = iter_args.next().ok_or_else(|| {
+                                DecodeError::missing(child, "missing x1 for cubic-bezier")
+                            })?;
+                            let x1: FloatOrInt<0, 1> = DecodeScalar::decode(val, ctx)?;
+                            let val = iter_args.next().ok_or_else(|| {
+                                DecodeError::missing(child, "missing y1 for cubic-bezier")
+                            })?;
+                            let y1: FloatOrInt<{ i32::MIN }, { i32::MAX }> =
+                                DecodeScalar::decode(val, ctx)?;
+                            let val = iter_args.next().ok_or_else(|| {
+                                DecodeError::missing(child, "missing x2 for cubic-bezier")
+                            })?;
+                            let x2: FloatOrInt<0, 1> = DecodeScalar::decode(val, ctx)?;
+                            let val = iter_args.next().ok_or_else(|| {
+                                DecodeError::missing(child, "missing y2 for cubic-bezier")
+                            })?;
+                            let y2: FloatOrInt<{ i32::MIN }, { i32::MAX }> =
+                                DecodeScalar::decode(val, ctx)?;
+                            Some(Curve::CubicBezier(x1.0, y1.0, x2.0, y2.0))
+                        }
+                        other => {
+                            ctx.emit_error(DecodeError::unexpected(
+                                &val.literal,
+                                "argument",
+                                format!(
+                                    "unexpected animation curve `{other}`. Expected one of: \
+                                     `linear`, `ease-out-quad`, `ease-out-cubic`, `ease-out-expo`, \
+                                     or `cubic-bezier`."
+                                ),
+                            ));
+                            None
+                        }
+                    };
+                    if let Some(curve) = curve {
+                        part.curve = Some(curve);
+                    }
                 }
                 "spring" => {
                     let mut damping_ratio = None;
@@ -81,11 +146,17 @@ where
                             }
                             "stiffness" => stiffness = Some(DecodeScalar::decode(val, ctx)?),
                             "epsilon" => epsilon = Some(DecodeScalar::decode(val, ctx)?),
-                            _ => (),
+                            other => {
+                                ctx.emit_error(DecodeError::unexpected(
+                                    name,
+                                    "property",
+                                    format!("unexpected spring property `{other}`"),
+                                ));
+                            }
                         }
                     }
                     part.spring = Some(WindowPickerSpringPart {
-                        damping_ratio: damping_ratio.unwrap_or(0.6),
+                        damping_ratio: damping_ratio.unwrap_or(0.65),
                         stiffness: stiffness.unwrap_or(320),
                         epsilon: epsilon.unwrap_or(0.0001),
                     });
@@ -113,6 +184,14 @@ pub struct WindowPickerSpringPart {
 
 impl WindowPickerAnimPart {
     pub fn into_override(&self) -> WindowPickerAnim {
+        if self.off {
+            return WindowPickerAnim {
+                off: true,
+                kind: None,
+                explicit_duration_ms: None,
+            };
+        }
+
         let kind = if let Some(spring) = &self.spring {
             Some(AnimKind::Spring(SpringParams {
                 damping_ratio: spring.damping_ratio,
@@ -120,33 +199,33 @@ impl WindowPickerAnimPart {
                 epsilon: spring.epsilon,
             }))
         } else if self.curve.is_some() || self.duration_ms.is_some() {
-            let curve_owned = self.curve.clone();
-            let curve = match curve_owned.as_deref() {
-                Some("linear") => Curve::Linear,
-                Some("ease-out-quad") => Curve::EaseOutQuad,
-                Some("ease-out-expo") => Curve::EaseOutExpo,
-                _ => Curve::EaseOutCubic,
-            };
+            let curve = self.curve.unwrap_or(Curve::EaseOutCubic);
             Some(AnimKind::Easing(EasingParams {
-                duration_ms: u32::from(self.duration_ms.unwrap_or(180)),
+                duration_ms: u32::from(self.duration_ms.unwrap_or(180).max(1)),
                 curve,
             }))
         } else {
             None
         };
-        WindowPickerAnim { kind }
+        WindowPickerAnim {
+            off: false,
+            kind,
+            explicit_duration_ms: self.duration_ms,
+        }
     }
 }
 
 /// Highlight styling for the focused window and the hovered preview.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowPickerSelection {
-    /// Label inversion color for the window that had focus when the picker opened.
+    /// Label inversion and glow color for the window that had focus when the picker opened.
     pub focused_color: Color,
-    /// Accent color for the hovered preview: glow and inverted label.
+    /// Accent color for the hovered / keyboard-selected preview: glow and inverted label.
     pub hover_color: Color,
-    /// Soft accent glow behind the hovered preview.
+    /// Soft accent glow behind the hovered / focused preview.
     pub glow: bool,
+    /// Continuously breathe the glow while idle (false = 0 FPS idle when static).
+    pub glow_pulse: bool,
 }
 
 impl Default for WindowPickerSelection {
@@ -155,6 +234,7 @@ impl Default for WindowPickerSelection {
             focused_color: Color::from_rgba8_unpremul(115, 218, 202, 255),
             hover_color: Color::from_rgba8_unpremul(115, 218, 202, 255),
             glow: true,
+            glow_pulse: false,
         }
     }
 }
@@ -167,6 +247,8 @@ pub struct WindowPickerSelectionPart {
     pub hover_color: Option<Color>,
     #[knuffel(child, unwrap(argument))]
     pub glow: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub glow_pulse: Option<bool>,
 }
 
 /// Configuration for the keyboard-driven window picker.
@@ -180,6 +262,10 @@ pub struct WindowPicker {
     pub backdrop: WindowPickerBackdrop,
     pub animation_ms_open: u16,
     pub animation_ms_close: u16,
+    /// True when the user explicitly configured `animation-ms-open` in config.
+    pub has_explicit_open_ms: bool,
+    /// True when the user explicitly configured `animation-ms-close` in config.
+    pub has_explicit_close_ms: bool,
     /// Stagger between consecutive preview entry animations (0 disables).
     pub stagger_ms: u16,
     /// Easing/spring override for both open and close animations.
@@ -190,6 +276,16 @@ pub struct WindowPicker {
     pub card: WindowPickerCard,
     /// Entry animation style; all styles share the global open/close duration.
     pub motion: WindowPickerMotion,
+    /// Grid packing mode: `grid` or `justified` (equal-height rows).
+    pub layout: WindowPickerLayout,
+    /// Optional grouping of windows (`none`, `workspace`, `output`).
+    pub group_by: WindowPickerGroupBy,
+    /// Default scope when opening the picker (`all`, `workspace`, `output`).
+    pub scope: WindowPickerScope,
+    /// Show the top glass HUD bar with scope selector, search input, and full title.
+    pub show_hud: bool,
+    /// Left-clicking empty backdrop space closes the picker.
+    pub click_backdrop_to_close: bool,
 }
 
 impl Default for WindowPicker {
@@ -203,11 +299,18 @@ impl Default for WindowPicker {
             backdrop: WindowPickerBackdrop::default(),
             animation_ms_open: 180,
             animation_ms_close: 180,
+            has_explicit_open_ms: false,
+            has_explicit_close_ms: false,
             stagger_ms: 28,
             animation: WindowPickerAnim::default(),
             selection: WindowPickerSelection::default(),
             card: WindowPickerCard::default(),
             motion: WindowPickerMotion::default(),
+            layout: WindowPickerLayout::default(),
+            group_by: WindowPickerGroupBy::default(),
+            scope: WindowPickerScope::default(),
+            show_hud: true,
+            click_backdrop_to_close: true,
         }
     }
 }
@@ -240,15 +343,57 @@ pub struct WindowPickerPart {
     pub card: Option<WindowPickerCardPart>,
     #[knuffel(child)]
     pub motion: Option<WindowPickerMotionPart>,
+    #[knuffel(child, unwrap(argument))]
+    pub layout: Option<WindowPickerLayout>,
+    #[knuffel(child, unwrap(argument))]
+    pub group_by: Option<WindowPickerGroupBy>,
+    #[knuffel(child, unwrap(argument))]
+    pub scope: Option<WindowPickerScope>,
+    #[knuffel(child, unwrap(argument))]
+    pub show_hud: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub click_backdrop_to_close: Option<bool>,
+}
+
+impl WindowPicker {
+    /// Returns the explicit target total duration (in ms) for opening/closing if configured via
+    /// `animation { duration-ms ... }` or top-level `animation-ms-open` / `animation-ms-close`.
+    /// When `None` is returned in Spring mode, the spring runs for its natural physical duration.
+    pub fn target_duration_ms(&self, open: bool) -> Option<u16> {
+        if let Some(ms) = self.animation.explicit_duration_ms {
+            return Some(ms);
+        }
+        if open && self.has_explicit_open_ms {
+            return Some(self.animation_ms_open);
+        }
+        if !open && self.has_explicit_close_ms {
+            return Some(self.animation_ms_close);
+        }
+        None
+    }
 }
 
 impl MergeWith<WindowPickerPart> for WindowPicker {
     fn merge_with(&mut self, part: &WindowPickerPart) {
         merge!((self, part), area_width, area_height, max_scale, gap);
         merge!((self, part), label, backdrop);
-        merge_clone!((self, part), animation_ms_open);
-        merge_clone!((self, part), animation_ms_close);
-        merge_clone!((self, part), stagger_ms);
+        if part.animation_ms_open.is_some() {
+            self.has_explicit_open_ms = true;
+        }
+        if part.animation_ms_close.is_some() {
+            self.has_explicit_close_ms = true;
+        }
+        merge_clone!(
+            (self, part),
+            animation_ms_open,
+            animation_ms_close,
+            stagger_ms,
+            layout,
+            group_by,
+            scope,
+            show_hud,
+            click_backdrop_to_close,
+        );
         if let Some(anim) = &part.animation {
             self.animation = anim.into_override();
         }
@@ -257,7 +402,8 @@ impl MergeWith<WindowPickerPart> for WindowPicker {
                 (self.selection, selection),
                 focused_color,
                 hover_color,
-                glow
+                glow,
+                glow_pulse,
             );
         }
         if let Some(card) = &part.card {
@@ -500,5 +646,73 @@ mod tests {
         assert_eq!(bind.key.trigger, Trigger::Keysym(Keysym::Tab));
         assert_eq!(bind.press_action(), Some(&Action::ToggleWindowPicker));
         assert!(!bind.repeat);
+    }
+
+    #[test]
+    fn parse_window_picker_enhanced_options_and_validation() {
+        let config = Config::parse_mem(
+            r##"
+            window-picker {
+                layout "justified"
+                group-by "workspace"
+                scope "output"
+                show-hud false
+                click-backdrop-to-close false
+                animation-ms-open 240
+                animation-ms-close 150
+                motion {
+                    style "hero"
+                }
+                animation {
+                    curve "ease-out-expo"
+                }
+                selection {
+                    glow true
+                    glow-pulse true
+                }
+                card {
+                    tilt false
+                    show-icons false
+                    glass-border "#ffffff44"
+                }
+            }
+            "##,
+        )
+        .unwrap();
+
+        let wp = &config.window_picker;
+        assert_eq!(wp.layout, crate::WindowPickerLayout::Justified);
+        assert_eq!(wp.group_by, crate::WindowPickerGroupBy::Workspace);
+        assert_eq!(wp.scope, crate::WindowPickerScope::Output);
+        assert!(!wp.show_hud);
+        assert!(!wp.click_backdrop_to_close);
+        assert_eq!(wp.motion.style, crate::WindowPickerMotionStyle::Hero);
+        assert!(wp.selection.glow_pulse);
+        assert!(!wp.card.tilt);
+        assert!(!wp.card.show_icons);
+
+        // Curve without explicit duration-ms respects per-direction animation-ms-* fallbacks!
+        let open_anim = wp.animation.to_animation(wp.animation_ms_open);
+        let close_anim = wp.animation.to_animation(wp.animation_ms_close);
+        assert_eq!(
+            open_anim.kind,
+            crate::animations::Kind::Easing(crate::animations::EasingParams {
+                duration_ms: 240,
+                curve: crate::animations::Curve::EaseOutExpo,
+            })
+        );
+        assert_eq!(
+            close_anim.kind,
+            crate::animations::Kind::Easing(crate::animations::EasingParams {
+                duration_ms: 150,
+                curve: crate::animations::Curve::EaseOutExpo,
+            })
+        );
+
+        // Invalid motion style and invalid curve must emit parse errors instead of silent fallback.
+        assert!(
+            Config::parse_mem(r#"window-picker { motion { style "nonexistent"; }; }"#).is_err()
+        );
+        assert!(Config::parse_mem(r#"window-picker { animation { curve "unknown"; }; }"#).is_err());
     }
 }

@@ -6,6 +6,12 @@ use smithay::backend::renderer::gles::{ffi, Capability, GlesError, GlesFrame, Gl
 pub struct Resources {
     pub vertices: Vec<f32>,
     pub vbos: [ffi::types::GLuint; 2],
+    /// Persistent fullscreen quad VBO for Dual Kawase blur passes.
+    pub blur_vbo: ffi::types::GLuint,
+    /// Persistent FBO reused across Dual Kawase blur passes (avoids per-frame Gen/Delete).
+    pub blur_fbo: ffi::types::GLuint,
+    /// Persistent FBO reused for non-xray FramebufferEffect blits.
+    pub blit_fbo: ffi::types::GLuint,
 }
 
 static INSTANCED_VERTS: [ffi::types::GLfloat; 8] = [
@@ -14,6 +20,9 @@ static INSTANCED_VERTS: [ffi::types::GLfloat; 8] = [
     1.0, 1.0, // bottom right
     0.0, 1.0, // bottom left
 ];
+
+static BLUR_QUAD_VERTS: [ffi::types::GLfloat; 12] =
+    [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
 
 /// Vertices for rendering individual triangles.
 const MAX_RECTS_PER_DRAW: usize = 10;
@@ -66,7 +75,7 @@ impl Resources {
                 &TRIANGLE_VERTS
             };
 
-            let mut vbos = [0; 2];
+            let mut vbos = [0; 3];
             gl.GenBuffers(vbos.len() as i32, vbos.as_mut_ptr());
             gl.BindBuffer(ffi::ARRAY_BUFFER, vbos[0]);
             gl.BufferData(
@@ -76,17 +85,36 @@ impl Resources {
                 ffi::STATIC_DRAW,
             );
 
+            gl.BindBuffer(ffi::ARRAY_BUFFER, vbos[2]);
+            gl.BufferData(
+                ffi::ARRAY_BUFFER,
+                std::mem::size_of_val(&BLUR_QUAD_VERTS) as isize,
+                BLUR_QUAD_VERTS.as_ptr() as *const _,
+                ffi::STATIC_DRAW,
+            );
+
             gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+
+            let mut fbos = [0; 2];
+            gl.GenFramebuffers(fbos.len() as i32, fbos.as_mut_ptr());
 
             Self {
                 vertices: vec![],
-                vbos,
+                vbos: [vbos[0], vbos[1]],
+                blur_vbo: vbos[2],
+                blur_fbo: fbos[0],
+                blit_fbo: fbos[1],
             }
         })
     }
 
     pub fn get(frame: &mut GlesFrame) -> Option<Rc<RefCell<Self>>> {
         let data = frame.egl_context().user_data();
+        data.get().cloned()
+    }
+
+    pub fn get_from_renderer(renderer: &mut GlesRenderer) -> Option<Rc<RefCell<Self>>> {
+        let data = renderer.egl_context().user_data();
         data.get().cloned()
     }
 }

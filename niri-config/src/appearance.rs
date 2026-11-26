@@ -388,6 +388,15 @@ impl MergeWith<BlurPart> for Blur {
     }
 }
 
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiquidGlassPreset {
+    Liquid,
+    Frosted,
+    Crystal,
+    Acrylic,
+    Obsidian,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LiquidGlass {
     pub refraction_strength: f64,
@@ -414,6 +423,151 @@ pub struct LiquidGlass {
     pub sheen_color: Color,
     /// Strength of the soft top sheen (0 disables).
     pub sheen_strength: f64,
+    /// Use physically-based analytic-SDF Snell refraction (true) or legacy simple refraction
+    /// (false).
+    pub physical_refraction: bool,
+    /// Physical index of refraction (glass ~1.45-1.52, water ~1.33, crystal ~1.65).
+    pub ior: f64,
+    /// Optical glass thickness in logical pixels for Snell refraction projection.
+    pub thickness: f64,
+    /// Blend towards the unblurred sharp background inside the bevel edge (0 = uniform blur, 1 =
+    /// crystal clear bevel).
+    pub bevel_clarity: f64,
+    /// Physical Cauchy spectral dispersion (0 falls back to legacy `fringing` scaling).
+    pub dispersion: f64,
+    /// Automatically adapt glass legibility/vibrancy to bright vs dark backgrounds.
+    pub adaptive_contrast: bool,
+    /// Interactive proximity glow along the glass bevel near the pointer (0 disables).
+    pub cursor_glow: f64,
+    /// One-shot diagonal glass shimmer sweep when the window gains focus (0 disables).
+    pub focus_shimmer: f64,
+}
+
+impl LiquidGlass {
+    pub fn from_preset(preset: LiquidGlassPreset) -> Self {
+        match preset {
+            LiquidGlassPreset::Liquid => Self {
+                refraction_strength: 14.0,
+                power_factor: 2.8,
+                refraction_power: 1.05,
+                glow_weight: 0.16,
+                bevel_width: 1.0,
+                bevel_px: 24.0,
+                fringing: 0.35,
+                interior_warp: 0.08,
+                rim_color: Color::from_rgba8_unpremul(255, 255, 255, 255),
+                rim_strength: 0.95,
+                edge_lighting: 1.05,
+                inner_shadow: 0.16,
+                sheen_color: Color::from_rgba8_unpremul(255, 255, 255, 255),
+                sheen_strength: 0.18,
+                physical_refraction: true,
+                ior: 1.48,
+                thickness: 22.0,
+                bevel_clarity: 0.85,
+                dispersion: 0.045,
+                adaptive_contrast: true,
+                cursor_glow: 0.35,
+                focus_shimmer: 0.5,
+            },
+            LiquidGlassPreset::Frosted => Self {
+                refraction_strength: 3.5,
+                power_factor: 2.2,
+                refraction_power: 0.65,
+                glow_weight: 0.08,
+                bevel_width: 1.0,
+                bevel_px: 12.0,
+                fringing: 0.05,
+                interior_warp: 0.0,
+                rim_color: Color::from_rgba8_unpremul(235, 244, 255, 200),
+                rim_strength: 0.45,
+                edge_lighting: 0.65,
+                inner_shadow: 0.08,
+                sheen_color: Color::from_rgba8_unpremul(255, 255, 255, 190),
+                sheen_strength: 0.10,
+                physical_refraction: true,
+                ior: 1.33,
+                thickness: 8.0,
+                bevel_clarity: 0.12,
+                dispersion: 0.0,
+                adaptive_contrast: true,
+                cursor_glow: 0.15,
+                focus_shimmer: 0.25,
+            },
+            LiquidGlassPreset::Crystal => Self {
+                refraction_strength: 24.0,
+                power_factor: 3.2,
+                refraction_power: 1.4,
+                glow_weight: 0.24,
+                bevel_width: 1.0,
+                bevel_px: 34.0,
+                fringing: 0.8,
+                interior_warp: 0.18,
+                rim_color: Color::from_rgba8_unpremul(235, 250, 255, 255),
+                rim_strength: 1.35,
+                edge_lighting: 1.4,
+                inner_shadow: 0.22,
+                sheen_color: Color::from_rgba8_unpremul(235, 248, 255, 255),
+                sheen_strength: 0.28,
+                physical_refraction: true,
+                ior: 1.62,
+                thickness: 26.0,
+                bevel_clarity: 0.96,
+                dispersion: 0.14,
+                adaptive_contrast: true,
+                cursor_glow: 0.5,
+                focus_shimmer: 0.75,
+            },
+            LiquidGlassPreset::Acrylic => Self {
+                refraction_strength: 1.2,
+                power_factor: 2.0,
+                refraction_power: 0.45,
+                glow_weight: 0.05,
+                bevel_width: 1.0,
+                bevel_px: 8.0,
+                fringing: 0.0,
+                interior_warp: 0.0,
+                rim_color: Color::from_rgba8_unpremul(255, 255, 255, 155),
+                rim_strength: 0.35,
+                edge_lighting: 0.4,
+                inner_shadow: 0.04,
+                sheen_color: Color::from_rgba8_unpremul(255, 255, 255, 140),
+                sheen_strength: 0.05,
+                physical_refraction: true,
+                ior: 1.25,
+                thickness: 4.0,
+                bevel_clarity: 0.0,
+                dispersion: 0.0,
+                adaptive_contrast: true,
+                cursor_glow: 0.18,
+                focus_shimmer: 0.2,
+            },
+            LiquidGlassPreset::Obsidian => Self {
+                refraction_strength: 12.0,
+                power_factor: 3.2,
+                refraction_power: 1.0,
+                glow_weight: 0.16,
+                bevel_width: 1.0,
+                bevel_px: 22.0,
+                fringing: 0.25,
+                interior_warp: 0.05,
+                rim_color: Color::from_rgba8_unpremul(120, 210, 255, 245),
+                rim_strength: 1.05,
+                edge_lighting: 1.25,
+                inner_shadow: 0.65,
+                sheen_color: Color::from_rgba8_unpremul(130, 210, 255, 190),
+                sheen_strength: 0.16,
+                physical_refraction: true,
+                ior: 1.54,
+                thickness: 20.0,
+                bevel_clarity: 0.70,
+                dispersion: 0.03,
+                adaptive_contrast: true,
+                cursor_glow: 0.45,
+                focus_shimmer: 0.55,
+            },
+        }
+    }
 }
 
 impl Default for LiquidGlass {
@@ -433,12 +587,22 @@ impl Default for LiquidGlass {
             inner_shadow: 0.0,
             sheen_color: Color::from_rgba8_unpremul(255, 255, 255, 255),
             sheen_strength: 0.0,
+            physical_refraction: true,
+            ior: 1.45,
+            thickness: 16.0,
+            bevel_clarity: 0.65,
+            dispersion: 0.0,
+            adaptive_contrast: true,
+            cursor_glow: 0.0,
+            focus_shimmer: 0.0,
         }
     }
 }
 
 #[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
 pub struct LiquidGlassPart {
+    #[knuffel(child, unwrap(argument))]
+    pub preset: Option<LiquidGlassPreset>,
     #[knuffel(child, unwrap(argument))]
     pub refraction_strength: Option<FloatOrInt<0, 100>>,
     #[knuffel(child, unwrap(argument))]
@@ -467,10 +631,30 @@ pub struct LiquidGlassPart {
     pub sheen_color: Option<Color>,
     #[knuffel(child, unwrap(argument))]
     pub sheen_strength: Option<FloatOrInt<0, 10>>,
+    #[knuffel(child, unwrap(argument))]
+    pub physical_refraction: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub ior: Option<FloatOrInt<1, 3>>,
+    #[knuffel(child, unwrap(argument))]
+    pub thickness: Option<FloatOrInt<0, 256>>,
+    #[knuffel(child, unwrap(argument))]
+    pub bevel_clarity: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub dispersion: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub adaptive_contrast: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub cursor_glow: Option<FloatOrInt<0, 2>>,
+    #[knuffel(child, unwrap(argument))]
+    pub focus_shimmer: Option<FloatOrInt<0, 2>>,
 }
 
 impl MergeWith<LiquidGlassPart> for LiquidGlass {
     fn merge_with(&mut self, part: &LiquidGlassPart) {
+        if let Some(preset) = part.preset {
+            *self = Self::from_preset(preset);
+        }
+
         merge!(
             (self, part),
             refraction_strength,
@@ -485,6 +669,12 @@ impl MergeWith<LiquidGlassPart> for LiquidGlass {
             edge_lighting,
             inner_shadow,
             sheen_strength,
+            ior,
+            thickness,
+            bevel_clarity,
+            dispersion,
+            cursor_glow,
+            focus_shimmer,
         );
 
         if let Some(x) = part.rim_color {
@@ -492,6 +682,12 @@ impl MergeWith<LiquidGlassPart> for LiquidGlass {
         }
         if let Some(x) = part.sheen_color {
             self.sheen_color = x;
+        }
+        if let Some(x) = part.physical_refraction {
+            self.physical_refraction = x;
+        }
+        if let Some(x) = part.adaptive_contrast {
+            self.adaptive_contrast = x;
         }
     }
 }
@@ -518,6 +714,8 @@ pub struct BackgroundTint {
     pub radial_size: f64,
     /// Multiplier for the center color's alpha in radial mode.
     pub radial_depth: f64,
+    /// Interpolate tint gradient in perceptually uniform Oklab space instead of sRGB.
+    pub oklab: bool,
 }
 
 impl Default for BackgroundTint {
@@ -532,6 +730,7 @@ impl Default for BackgroundTint {
             linear_depth: 1.0,
             radial_size: 0.0,
             radial_depth: 1.0,
+            oklab: true,
         }
     }
 }
@@ -562,6 +761,8 @@ pub struct BackgroundTintPart {
     pub radial_size: Option<FloatOrInt<0, 1>>,
     #[knuffel(child, unwrap(argument))]
     pub radial_depth: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child, unwrap(argument))]
+    pub oklab: Option<bool>,
 }
 
 impl MergeWith<BackgroundTintPart> for BackgroundTint {
@@ -592,6 +793,9 @@ impl MergeWith<BackgroundTintPart> for BackgroundTint {
         }
         if let Some(x) = part.radial_depth {
             self.radial_depth = x.0;
+        }
+        if let Some(x) = part.oklab {
+            self.oklab = x;
         }
     }
 }
@@ -1286,6 +1490,10 @@ pub struct BackgroundEffectRule {
     #[knuffel(child, unwrap(argument))]
     pub blur: Option<bool>,
     #[knuffel(child, unwrap(argument))]
+    pub blur_passes: Option<u8>,
+    #[knuffel(child, unwrap(argument))]
+    pub blur_offset: Option<FloatOrInt<0, 100>>,
+    #[knuffel(child, unwrap(argument))]
     pub noise: Option<FloatOrInt<0, 1000>>,
     #[knuffel(child, unwrap(argument))]
     pub saturation: Option<FloatOrInt<0, 1000>>,
@@ -1313,6 +1521,11 @@ pub struct BackgroundEffect {
     /// - `Some(true)`: always blur
     pub blur: Option<bool>,
 
+    /// Optional per-rule override of global blur pass count.
+    pub blur_passes: Option<u8>,
+    /// Optional per-rule override of global blur offset.
+    pub blur_offset: Option<f64>,
+
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
     pub tint: Option<BackgroundTint>,
@@ -1321,7 +1534,11 @@ pub struct BackgroundEffect {
 
 impl MergeWith<BackgroundEffectRule> for BackgroundEffect {
     fn merge_with(&mut self, part: &BackgroundEffectRule) {
-        merge_clone_opt!((self, part), xray, blur);
+        merge_clone_opt!((self, part), xray, blur, blur_passes);
+
+        if let Some(x) = part.blur_offset {
+            self.blur_offset = Some(x.0);
+        }
 
         if let Some(x) = part.noise {
             self.noise = Some(x.0);
@@ -1679,13 +1896,60 @@ mod tests {
         assert_eq!(lg.edge_lighting, 1.0);
         assert_eq!(lg.inner_shadow, 0.0);
         assert_eq!(lg.sheen_strength, 0.0);
+        assert!(lg.physical_refraction);
+        assert_eq!(lg.ior, 1.45);
+        assert_eq!(lg.thickness, 16.0);
+        assert_eq!(lg.bevel_clarity, 0.65);
+        assert!(lg.adaptive_contrast);
 
         let tint = BackgroundTint::default();
         assert_eq!(tint.linear_size, 0.0);
         assert_eq!(tint.linear_depth, 1.0);
         assert_eq!(tint.radial_size, 0.0);
         assert_eq!(tint.radial_depth, 1.0);
+        assert!(tint.oklab);
         assert!(!tint.is_visible());
+    }
+
+    #[test]
+    fn parse_liquid_glass_preset_and_blur_overrides() {
+        let config = Config::parse_mem(
+            r##"
+            window-rule {
+                match app-id="^kitty$"
+                background-effect {
+                    blur true
+                    blur-passes 4
+                    blur-offset 4.5
+                    tint {
+                        from "#10203080"
+                        to "#40506080"
+                        oklab false
+                    }
+                    liquid-glass {
+                        preset "crystal"
+                        bevel-clarity 0.8
+                        cursor-glow 0.3
+                        focus-shimmer 0.5
+                    }
+                }
+            }
+            "##,
+        )
+        .unwrap();
+
+        let mut effect = BackgroundEffect::default();
+        effect.merge_with(&config.window_rules[0].background_effect);
+        assert_eq!(effect.blur_passes, Some(4));
+        assert_eq!(effect.blur_offset, Some(4.5));
+        assert!(!effect.tint.unwrap().oklab);
+        let lg = effect.liquid_glass.unwrap();
+        // Preset values carried over unless explicitly overridden.
+        assert_eq!(lg.ior, 1.62);
+        assert_eq!(lg.thickness, 26.0);
+        assert_eq!(lg.bevel_clarity, 0.8);
+        assert_eq!(lg.cursor_glow, 0.3);
+        assert_eq!(lg.focus_shimmer, 0.5);
     }
 }
 
