@@ -363,6 +363,13 @@ impl XdgShellHandler for State {
                         return;
                     }
                 }
+
+                let mon = self.niri.layout.monitor_for_output(output).unwrap();
+                if mon.render_above_top_layer() && layer.layer() != Layer::Overlay {
+                    trace!("ignoring popup grab for a layer surface below fullscreen window");
+                    let _ = PopupManager::dismiss_popup(&root, &popup);
+                    return;
+                }
             } else {
                 // This is a grab for a regular window; check that there's no layer surface with a
                 // higher input priority.
@@ -1027,6 +1034,11 @@ impl XdgDecorationHandler for State {
             }
         }
     }
+
+    fn decoration_destroyed(&mut self, _toplevel: ToplevelSurface) {
+        // We rely on Smithay's decoration_mode (which it resets on its own), and don't track any
+        // state on our own. Nothing to do here.
+    }
 }
 
 /// Whether KDE server decorations are in use.
@@ -1112,8 +1124,8 @@ impl State {
         let mon = mon.or_else(|| {
             rules
                 .open_on_output
-                .as_deref()
-                .and_then(|name| {
+                .iter()
+                .find_map(|name| {
                     self.niri
                         .global_space
                         .outputs()
@@ -1300,6 +1312,11 @@ impl State {
             Some((layer_surface.clone(), o))
         }) {
             self.unconstrain_layer_shell_popup(popup, &layer_surface, output);
+        } else if let Some(output) = self.niri.layout.outputs().find_map(|o| {
+            let lock = self.niri.output_state[o].lock_surface.as_ref()?;
+            (lock.wl_surface() == &root).then_some(o)
+        }) {
+            self.unconstrain_lock_popup(popup, output);
         }
     }
 
@@ -1352,6 +1369,22 @@ impl State {
         let geo_off = Point::new(0., 0.);
 
         // Don't add padding to layer-shell popups. It's not really needed, and it's unexpected.
+        self.position_popup_within_rect(popup, geo_off, target.to_f64(), false);
+    }
+
+    pub fn unconstrain_lock_popup(&self, popup: &PopupKind, output: &Output) {
+        let output_geo = self.niri.global_space.output_geometry(output).unwrap();
+
+        // The target geometry for the positioner should be relative to its parent's geometry, so
+        // we will compute that here.
+        let mut target = Rectangle::from_size(output_geo.size);
+
+        target.loc -= get_popup_toplevel_coords(popup);
+
+        // Lock surfaces don't have geometry.
+        let geo_off = Point::new(0., 0.);
+
+        // Don't add padding to lock popups.
         self.position_popup_within_rect(popup, geo_off, target.to_f64(), false);
     }
 

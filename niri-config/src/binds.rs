@@ -240,6 +240,8 @@ pub enum Action {
     Quit(#[knuffel(property(name = "skip-confirmation"), default)] bool),
     ChangeVt(#[knuffel(argument)] u8),
     Suspend,
+    #[knuffel(skip)]
+    PowerKeySuspend,
     PowerOffMonitors,
     PowerOnMonitors,
     ToggleDebugTint,
@@ -291,10 +293,31 @@ pub enum Action {
     ToggleWindowedFullscreen,
     #[knuffel(skip)]
     ToggleWindowedFullscreenById(u64),
+    SetWindowFullscreen,
+    #[knuffel(skip)]
+    SetWindowFullscreenById(u64),
+    UnsetWindowFullscreen,
+    #[knuffel(skip)]
+    UnsetWindowFullscreenById(u64),
+    SetWindowMaximizedToEdges,
+    #[knuffel(skip)]
+    SetWindowMaximizedToEdgesById(u64),
+    UnsetWindowMaximizedToEdges,
+    #[knuffel(skip)]
+    UnsetWindowMaximizedToEdgesById(u64),
+    SetWindowedFullscreen,
+    #[knuffel(skip)]
+    SetWindowedFullscreenById(u64),
+    UnsetWindowedFullscreen,
+    #[knuffel(skip)]
+    UnsetWindowedFullscreenById(u64),
     #[knuffel(skip)]
     FocusWindow(u64),
     FocusWindowInColumn(#[knuffel(argument)] u8),
-    FocusWindowPrevious,
+    FocusWindowPrevious(
+        #[knuffel(property(name = "scope"), default)] MruScope,
+        #[knuffel(property(name = "filter"), default)] MruFilter,
+    ),
     FocusColumnLeft,
     #[knuffel(skip)]
     FocusColumnLeftUnderMouse,
@@ -322,15 +345,18 @@ pub enum Action {
     FocusWindowBottom,
     FocusWindowDownOrTop,
     FocusWindowUpOrBottom,
-    MoveColumnLeft,
-    MoveColumnRight,
-    MoveColumnToFirst,
-    MoveColumnToLast,
+    MoveColumnLeft(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveColumnRight(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveColumnToFirst(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveColumnToLast(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveColumnLeftOrToMonitorLeft,
     MoveColumnRightOrToMonitorRight,
-    MoveColumnToIndex(#[knuffel(argument)] usize),
-    MoveWindowDown,
-    MoveWindowUp,
+    MoveColumnToIndex(
+        #[knuffel(argument)] usize,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
+    MoveWindowDown(#[knuffel(property(name = "focus"), default = true)] bool),
+    MoveWindowUp(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveWindowDownOrToWorkspaceDown,
     MoveWindowUpOrToWorkspaceUp,
     ConsumeOrExpelWindowLeft,
@@ -341,8 +367,8 @@ pub enum Action {
     ConsumeOrExpelWindowRightById(u64),
     ConsumeWindowIntoColumn,
     ExpelWindowFromColumn,
-    SwapWindowLeft,
-    SwapWindowRight,
+    SwapWindowLeft(#[knuffel(property(name = "focus"), default = true)] bool),
+    SwapWindowRight(#[knuffel(property(name = "focus"), default = true)] bool),
     ToggleColumnTabbedDisplay,
     SetColumnDisplay(#[knuffel(argument, str)] ColumnDisplay),
     CenterColumn,
@@ -370,6 +396,22 @@ pub enum Action {
         reference: WorkspaceReference,
         focus: bool,
     },
+    MoveWindowToNewWorkspaceBelow(
+        #[knuffel(argument)] Option<WorkspaceReference>,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
+    MoveWindowToNewWorkspaceAbove(
+        #[knuffel(argument)] Option<WorkspaceReference>,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
+    MoveColumnToNewWorkspaceBelow(
+        #[knuffel(argument)] Option<WorkspaceReference>,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
+    MoveColumnToNewWorkspaceAbove(
+        #[knuffel(argument)] Option<WorkspaceReference>,
+        #[knuffel(property(name = "focus"), default = true)] bool,
+    ),
     MoveColumnToWorkspaceDown(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveColumnToWorkspaceUp(#[knuffel(property(name = "focus"), default = true)] bool),
     MoveColumnToWorkspace(
@@ -528,6 +570,10 @@ pub enum Action {
     MruSetScope(MruScope),
     #[knuffel(skip)]
     MruCycleScope,
+    #[knuffel(skip)]
+    GlobalShortcutActivateAction(u32),
+    #[knuffel(skip)]
+    GlobalShortcutDeactivateAction(u32),
 
     // Doesn't look like knuffel allows gating on #[cfg(test)]...
     #[knuffel(skip)]
@@ -582,9 +628,47 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::ToggleWindowedFullscreen { id: Some(id) } => {
                 Self::ToggleWindowedFullscreenById(id)
             }
+            niri_ipc::Action::SetWindowFullscreen { id: None } => Self::SetWindowFullscreen,
+            niri_ipc::Action::SetWindowFullscreen { id: Some(id) } => {
+                Self::SetWindowFullscreenById(id)
+            }
+            niri_ipc::Action::UnsetWindowFullscreen { id: None } => Self::UnsetWindowFullscreen,
+            niri_ipc::Action::UnsetWindowFullscreen { id: Some(id) } => {
+                Self::UnsetWindowFullscreenById(id)
+            }
+            niri_ipc::Action::SetWindowMaximizedToEdges { id: None } => {
+                Self::SetWindowMaximizedToEdges
+            }
+            niri_ipc::Action::SetWindowMaximizedToEdges { id: Some(id) } => {
+                Self::SetWindowMaximizedToEdgesById(id)
+            }
+            niri_ipc::Action::UnsetWindowMaximizedToEdges { id: None } => {
+                Self::UnsetWindowMaximizedToEdges
+            }
+            niri_ipc::Action::UnsetWindowMaximizedToEdges { id: Some(id) } => {
+                Self::UnsetWindowMaximizedToEdgesById(id)
+            }
+            niri_ipc::Action::SetWindowedFullscreen { id: None } => Self::SetWindowedFullscreen,
+            niri_ipc::Action::SetWindowedFullscreen { id: Some(id) } => {
+                Self::SetWindowedFullscreenById(id)
+            }
+            niri_ipc::Action::UnsetWindowedFullscreen { id: None } => Self::UnsetWindowedFullscreen,
+            niri_ipc::Action::UnsetWindowedFullscreen { id: Some(id) } => {
+                Self::UnsetWindowedFullscreenById(id)
+            }
             niri_ipc::Action::FocusWindow { id } => Self::FocusWindow(id),
             niri_ipc::Action::FocusWindowInColumn { index } => Self::FocusWindowInColumn(index),
-            niri_ipc::Action::FocusWindowPrevious {} => Self::FocusWindowPrevious,
+            niri_ipc::Action::FocusWindowPrevious { scope, filter } => Self::FocusWindowPrevious(
+                match scope {
+                    None | Some(niri_ipc::RecentWindowsScope::All) => MruScope::All,
+                    Some(niri_ipc::RecentWindowsScope::Output) => MruScope::Output,
+                    Some(niri_ipc::RecentWindowsScope::Workspace) => MruScope::Workspace,
+                },
+                match filter {
+                    None | Some(niri_ipc::RecentWindowsFilter::All) => MruFilter::All,
+                    Some(niri_ipc::RecentWindowsFilter::AppId) => MruFilter::AppId,
+                },
+            ),
             niri_ipc::Action::FocusColumnLeft {} => Self::FocusColumnLeft,
             niri_ipc::Action::FocusColumnRight {} => Self::FocusColumnRight,
             niri_ipc::Action::FocusColumnFirst {} => Self::FocusColumnFirst,
@@ -608,19 +692,21 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::FocusWindowBottom {} => Self::FocusWindowBottom,
             niri_ipc::Action::FocusWindowDownOrTop {} => Self::FocusWindowDownOrTop,
             niri_ipc::Action::FocusWindowUpOrBottom {} => Self::FocusWindowUpOrBottom,
-            niri_ipc::Action::MoveColumnLeft {} => Self::MoveColumnLeft,
-            niri_ipc::Action::MoveColumnRight {} => Self::MoveColumnRight,
-            niri_ipc::Action::MoveColumnToFirst {} => Self::MoveColumnToFirst,
-            niri_ipc::Action::MoveColumnToLast {} => Self::MoveColumnToLast,
-            niri_ipc::Action::MoveColumnToIndex { index } => Self::MoveColumnToIndex(index),
+            niri_ipc::Action::MoveColumnLeft { focus } => Self::MoveColumnLeft(focus),
+            niri_ipc::Action::MoveColumnRight { focus } => Self::MoveColumnRight(focus),
+            niri_ipc::Action::MoveColumnToFirst { focus } => Self::MoveColumnToFirst(focus),
+            niri_ipc::Action::MoveColumnToLast { focus } => Self::MoveColumnToLast(focus),
+            niri_ipc::Action::MoveColumnToIndex { index, focus } => {
+                Self::MoveColumnToIndex(index, focus)
+            }
             niri_ipc::Action::MoveColumnLeftOrToMonitorLeft {} => {
                 Self::MoveColumnLeftOrToMonitorLeft
             }
             niri_ipc::Action::MoveColumnRightOrToMonitorRight {} => {
                 Self::MoveColumnRightOrToMonitorRight
             }
-            niri_ipc::Action::MoveWindowDown {} => Self::MoveWindowDown,
-            niri_ipc::Action::MoveWindowUp {} => Self::MoveWindowUp,
+            niri_ipc::Action::MoveWindowDown { focus } => Self::MoveWindowDown(focus),
+            niri_ipc::Action::MoveWindowUp { focus } => Self::MoveWindowUp(focus),
             niri_ipc::Action::MoveWindowDownOrToWorkspaceDown {} => {
                 Self::MoveWindowDownOrToWorkspaceDown
             }
@@ -639,8 +725,8 @@ impl From<niri_ipc::Action> for Action {
             }
             niri_ipc::Action::ConsumeWindowIntoColumn {} => Self::ConsumeWindowIntoColumn,
             niri_ipc::Action::ExpelWindowFromColumn {} => Self::ExpelWindowFromColumn,
-            niri_ipc::Action::SwapWindowRight {} => Self::SwapWindowRight,
-            niri_ipc::Action::SwapWindowLeft {} => Self::SwapWindowLeft,
+            niri_ipc::Action::SwapWindowRight { focus } => Self::SwapWindowRight(focus),
+            niri_ipc::Action::SwapWindowLeft { focus } => Self::SwapWindowLeft(focus),
             niri_ipc::Action::ToggleColumnTabbedDisplay {} => Self::ToggleColumnTabbedDisplay,
             niri_ipc::Action::SetColumnDisplay { display } => Self::SetColumnDisplay(display),
             niri_ipc::Action::CenterColumn {} => Self::CenterColumn,
@@ -673,6 +759,18 @@ impl From<niri_ipc::Action> for Action {
                 reference: WorkspaceReference::from(reference),
                 focus,
             },
+            niri_ipc::Action::MoveWindowToNewWorkspaceBelow { reference, focus } => {
+                Self::MoveWindowToNewWorkspaceBelow(reference.map(WorkspaceReference::from), focus)
+            }
+            niri_ipc::Action::MoveWindowToNewWorkspaceAbove { reference, focus } => {
+                Self::MoveWindowToNewWorkspaceAbove(reference.map(WorkspaceReference::from), focus)
+            }
+            niri_ipc::Action::MoveColumnToNewWorkspaceBelow { reference, focus } => {
+                Self::MoveColumnToNewWorkspaceBelow(reference.map(WorkspaceReference::from), focus)
+            }
+            niri_ipc::Action::MoveColumnToNewWorkspaceAbove { reference, focus } => {
+                Self::MoveColumnToNewWorkspaceAbove(reference.map(WorkspaceReference::from), focus)
+            }
             niri_ipc::Action::MoveColumnToWorkspaceDown { focus } => {
                 Self::MoveColumnToWorkspaceDown(focus)
             }
@@ -1314,6 +1412,24 @@ impl FromStr for Key {
             Trigger::Modifier(ModKey::IsoLevel5Shift)
         } else {
             let mut keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
+
+            let with_xf86;
+            let mut final_key = key;
+            if keysym.raw() == KEY_NoSymbol {
+                // If the key didn't match, try it with an XF86 prefix.
+                // This way, you can write e.g. AudioMute instead of XF86AudioMute.
+                //
+                // This is actually needed for the xdg-desktop-portal-gnome implementation of the
+                // GlobalShortcuts portal, as it will request non-XF86-prefixed names. Mutter then
+                // does this same exact prefixing:
+                // https://gitlab.gnome.org/GNOME/mutter/-/blob/b48811767189fb5446bd1b831e98271a21866e09/src/core/meta-accel-parse.c#L302-311
+                with_xf86 = format!("XF86{key}");
+                keysym = keysym_from_name(&with_xf86, KEYSYM_CASE_INSENSITIVE);
+                if keysym.raw() != KEY_NoSymbol {
+                    final_key = &with_xf86;
+                }
+            }
+
             // The keyboard event handling code can receive either
             // XF86ScreenSaver or XF86Screensaver, because there is no
             // case mapping defined between these keysyms. If we just
@@ -1336,7 +1452,7 @@ impl FromStr for Key {
             //
             // See https://github.com/niri-wm/niri/issues/1969
             if keysym == Keysym::XF86_Screensaver {
-                keysym = keysym_from_name(key, KEYSYM_NO_FLAGS);
+                keysym = keysym_from_name(final_key, KEYSYM_NO_FLAGS);
                 if keysym.raw() == KEY_NoSymbol {
                     keysym = Keysym::XF86_ScreenSaver;
                 }
@@ -1382,6 +1498,29 @@ mod tests {
         );
         assert_eq!(
             "xf86screensaver".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::XF86_ScreenSaver),
+                modifiers: Modifiers::empty(),
+            }
+        );
+
+        // And now with the auto-prepended XF86 prefix.
+        assert_eq!(
+            "ScreenSaver".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::XF86_ScreenSaver),
+                modifiers: Modifiers::empty(),
+            },
+        );
+        assert_eq!(
+            "Screensaver".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::XF86_Screensaver),
+                modifiers: Modifiers::empty(),
+            }
+        );
+        assert_eq!(
+            "screensaver".parse::<Key>().unwrap(),
             Key {
                 trigger: Trigger::Keysym(Keysym::XF86_ScreenSaver),
                 modifiers: Modifiers::empty(),
