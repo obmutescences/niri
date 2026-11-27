@@ -40,6 +40,17 @@ impl Spring {
         self.oscillate(t.as_secs_f64())
     }
 
+    /// Returns the instantaneous velocity (d/dt) of the spring at time `t`.
+    pub fn velocity_at(&self, t: Duration) -> f64 {
+        const DT: f64 = 1e-4;
+        let t_s = t.as_secs_f64();
+        if t_s <= DT {
+            (self.oscillate(t_s + DT) - self.oscillate(t_s)) / DT
+        } else {
+            (self.oscillate(t_s + DT) - self.oscillate(t_s - DT)) / (2. * DT)
+        }
+    }
+
     // Based on libadwaita (LGPL-2.1-or-later):
     // https://gitlab.gnome.org/GNOME/libadwaita/-/blob/1.4.4/src/adw-spring-animation.c,
     // which itself is based on (MIT):
@@ -55,7 +66,41 @@ impl Spring {
         }
 
         if (self.to - self.from).abs() <= f64::EPSILON {
-            return Duration::ZERO;
+            if self.initial_velocity.abs() <= f64::EPSILON {
+                return Duration::ZERO;
+            }
+
+            let omega0 = (self.params.stiffness / self.params.mass).sqrt();
+            if omega0 <= f64::EPSILON {
+                return Duration::ZERO;
+            }
+
+            // Analytical envelope settling time for zero-displacement impulse springs (from == to,
+            // v0 != 0).
+            let eps = self.params.epsilon.max(1e-7);
+            let v0_abs = self.initial_velocity.abs();
+
+            if beta < omega0 && (beta - omega0).abs() > f64::from(f32::EPSILON) {
+                let omega1 = (omega0 * omega0 - beta * beta).sqrt();
+                let amp = (v0_abs / omega1).max(eps);
+                let t = (amp / eps).ln() / beta;
+                return Duration::from_secs_f64(t.clamp(0.01, 10.0));
+            }
+
+            // Critically damped or overdamped: find the peak, then step forward until
+            // |oscillate(t) - to| <= epsilon.
+            let t_peak = if (beta - omega0).abs() <= f64::from(f32::EPSILON) {
+                1. / omega0
+            } else {
+                let omega2 = (beta * beta - omega0 * omega0).sqrt();
+                (omega2 / beta).clamp(-0.999_999, 0.999_999).atanh() / omega2
+            };
+
+            let mut t = t_peak + 0.005;
+            while t < 10.0 && (self.oscillate(t) - self.to).abs() > eps {
+                t += 0.005;
+            }
+            return Duration::from_secs_f64(t.clamp(0.01, 10.0));
         }
 
         let omega0 = (self.params.stiffness / self.params.mass).sqrt();

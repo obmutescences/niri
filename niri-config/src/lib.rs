@@ -33,6 +33,7 @@ pub mod appearance;
 pub mod binds;
 pub mod debug;
 pub mod error;
+pub mod focus_animation;
 pub mod gestures;
 pub mod input;
 pub mod layer_rule;
@@ -46,6 +47,7 @@ pub mod window_picker;
 pub mod window_picker_card;
 pub mod window_rule;
 pub mod workspace;
+pub mod workspace_effects;
 
 pub use crate::animations::{Animation, Animations};
 pub use crate::appearance::*;
@@ -1956,6 +1958,7 @@ mod tests {
                 },
                 focus_animation: FocusAnimation {
                     enabled: false,
+                    mode: Impulse,
                     anim: Animation {
                         off: false,
                         kind: Easing(
@@ -1965,24 +1968,83 @@ mod tests {
                             },
                         ),
                     },
+                    duration_ms: None,
+                    in_duration_ms: None,
+                    in_curve: None,
+                    disable_on_solo: false,
+                    disable_on_floating: false,
+                    disable_on_fullscreen: true,
+                    disable_on_maximized: false,
+                    disable_on_open: true,
+                    disable_on_workspace_switch: false,
+                    debounce_ms: 35,
+                    brightness_pulse: 0.0,
+                    opacity_transition_ms: 0,
+                    lift: 0.0,
                     scale: FocusScale {
                         enabled: false,
                         flash_scale: 0.9,
+                        jelly: 0.0,
                         disable_on_solo: false,
                         disable_on_floating: false,
+                    },
+                    nudge: FocusNudge {
+                        enabled: false,
+                        distance: 12.0,
+                    },
+                    tilt: FocusTilt {
+                        enabled: false,
+                        angle: 3.5,
+                        pointer_press: true,
+                    },
+                    glow: FocusGlow {
+                        enabled: false,
+                        style: Ripple,
+                        color: Color {
+                            r: 0.19215687,
+                            g: 0.9647059,
+                            b: 0.7254902,
+                            a: 0.8,
+                        },
+                        spread: 16.0,
+                        strength: 0.85,
                     },
                 },
                 workspace_dip: WorkspaceDip {
                     enabled: false,
+                    mode: Sync,
                     strength: 0.04,
                     anim: None,
+                    duration_ms: None,
+                    distance_boost: 0.0,
+                    cruise_hold: true,
+                    peak_position: 0.5,
+                    corner_radius: 0.0,
+                    shadow_opacity: 0.0,
+                    backdrop_dim: 0.0,
+                    backdrop_parallax: 1.0,
                 },
                 workspace_switch_3d: WorkspaceSwitch3D {
                     enabled: false,
+                    style: Depth,
                     depth: 0.6,
                     squash: 0.8,
                     radius: 1.0,
                     curve_power: 1.5,
+                    pivot: Hinge,
+                    parallax: 0.0,
+                    gap_compression: 0.0,
+                    angle: 32.0,
+                    fov: 45.0,
+                    cube_side: Outside,
+                    velocity_tilt: 1.0,
+                    dim: 0.0,
+                    fade: 0.0,
+                    sheen: 0.0,
+                    corner_radius: 0.0,
+                    shadow_opacity: 0.0,
+                    exempt_moving_windows: true,
+                    bounce_3d: true,
                 },
                 preset_column_widths: [
                     Proportion(
@@ -2483,6 +2545,7 @@ mod tests {
                             liquid_glass: None,
                         },
                     },
+                    focus_animation: None,
                 },
             ],
             layer_rules: [
@@ -3290,9 +3353,10 @@ mod tests {
         +    ],
 
         -                flash_scale: 0.9,
+        +                flash_scale: 0.95,
+
         -                disable_on_solo: false,
         -                disable_on_floating: false,
-        +                flash_scale: 0.95,
         +                disable_on_solo: true,
         +                disable_on_floating: true,
 

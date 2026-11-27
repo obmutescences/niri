@@ -57,6 +57,7 @@ fn workspace_dip_independent_duration_is_honored() {
                         curve: Curve::Linear,
                     }),
                 }),
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -108,6 +109,177 @@ fn workspace_dip_independent_duration_is_honored() {
     // At t=1125 ms expand progress = 0.25 -> depth 0.75 -> zoom 0.625.
     advance_animations(&mut layout, 125);
     assert_abs_diff_eq!(zoom_at(&layout), 0.625, epsilon = 2e-2);
+}
+
+#[test]
+fn workspace_dip_velocity_mode_tracks_and_settles_to_idle() {
+    let mut options = Options {
+        layout: niri_config::Layout {
+            gaps: 0.,
+            workspace_dip: niri_config::WorkspaceDip {
+                enabled: true,
+                mode: niri_config::WorkspaceDipMode::Velocity,
+                strength: 0.2,
+                cruise_hold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Options::default()
+    };
+    options.animations.workspace_switch.0.kind = Kind::Easing(EasingParams {
+        duration_ms: 400,
+        curve: Curve::EaseOutCubic,
+    });
+
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToWorkspaceDown(false),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+
+    layout.switch_workspace_down();
+
+    // Advance in 16ms frames while switching; zoom must dip visibly below 1.0.
+    let mut min_zoom = 1.0f64;
+    for _ in 0..25 {
+        advance_animations(&mut layout, 16);
+        let z = match &layout.monitor_set {
+            MonitorSet::Normal { monitors, .. } => monitors[0].overview_zoom(),
+            MonitorSet::NoOutputs { .. } => unreachable!(),
+        };
+        min_zoom = min_zoom.min(z);
+    }
+    assert!(
+        min_zoom < 0.96,
+        "expected velocity dip below 0.96, got {min_zoom}"
+    );
+
+    // Advance until fully settled; must reach exact 1.0 and 0-FPS idle.
+    for _ in 0..120 {
+        advance_animations(&mut layout, 16);
+    }
+    let mon = match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => &monitors[0],
+        MonitorSet::NoOutputs { .. } => unreachable!(),
+    };
+    assert_abs_diff_eq!(mon.overview_zoom(), 1.0, epsilon = 1e-3);
+    assert!(
+        !mon.are_animations_ongoing(),
+        "velocity dip must settle to 0 FPS idle"
+    );
+}
+
+#[test]
+fn workspace_dip_guards_fullscreen_layer_until_complete() {
+    let mut options = Options {
+        layout: niri_config::Layout {
+            gaps: 0.,
+            workspace_dip: niri_config::WorkspaceDip {
+                enabled: true,
+                mode: niri_config::WorkspaceDipMode::Impulse,
+                strength: 0.15,
+                duration_ms: Some(800),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Options::default()
+    };
+    options.animations.workspace_switch.0.kind = Kind::Easing(EasingParams {
+        duration_ms: 150,
+        curve: Curve::Linear,
+    });
+
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::MoveWindowToWorkspaceDown(false),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops_with_options(options, ops);
+    layout.switch_workspace_down();
+
+    // Switch finishes at 150ms, but dip runs to 800ms -> monitor must keep animating and guard
+    // fullscreen layer without blocking pointer focus transitions.
+    advance_animations(&mut layout, 200);
+    let mon = match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => &monitors[0],
+        MonitorSet::NoOutputs { .. } => unreachable!(),
+    };
+    assert!(mon.workspace_switch.is_none());
+    assert!(mon.are_animations_ongoing());
+    assert!(!mon.are_transitions_ongoing());
+    assert!(mon.fullscreen_window_above_top_layer().is_none());
+
+    // After 800ms total, dip completes and returns to idle.
+    advance_animations(&mut layout, 700);
+    let mon = match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => &monitors[0],
+        MonitorSet::NoOutputs { .. } => unreachable!(),
+    };
+    assert!(!mon.are_animations_ongoing());
+}
+
+#[test]
+fn workspace_3d_hinge_pivot_anchors_edges_and_poses_cleanly() {
+    use crate::layout::workspace_effects::WorkspaceEffectsState;
+    use crate::render_helpers::workspace_3d::compute_workspace_3d_pose;
+
+    let cfg = niri_config::WorkspaceSwitch3D {
+        enabled: true,
+        style: niri_config::WorkspaceSwitch3DStyle::Parallax,
+        depth: 0.6,
+        squash: 0.8,
+        pivot: niri_config::WorkspaceSwitch3DPivot::Hinge,
+        dim: 0.3,
+        ..Default::default()
+    };
+
+    // Upper workspace (above center) anchors near its bottom edge; lower workspace anchors near
+    // top.
+    let upper = Rectangle::new(Point::from((0., -540.)), Size::from((1920., 1080.)));
+    let tf_up = WorkspaceEffectsState::engine_a_transform(upper, 1080., cfg, 1.0, 1.0).unwrap();
+    assert!(tf_up.pivot.y > upper.loc.y + upper.size.h * 0.75);
+    assert!(tf_up.dim_alpha > 0.05);
+
+    let lower = Rectangle::new(Point::from((0., 540.)), Size::from((1920., 1080.)));
+    let tf_down = WorkspaceEffectsState::engine_a_transform(lower, 1080., cfg, 1.0, 1.0).unwrap();
+    assert!(tf_down.pivot.y < lower.loc.y + lower.size.h * 0.25);
+
+    // Engine B cube & carousel poses produce valid non-NaN geometry across all 5 styles.
+    for style in [
+        niri_config::WorkspaceSwitch3DStyle::Carousel,
+        niri_config::WorkspaceSwitch3DStyle::Cube,
+        niri_config::WorkspaceSwitch3DStyle::Cards,
+        niri_config::WorkspaceSwitch3DStyle::TiltSlide,
+        niri_config::WorkspaceSwitch3DStyle::Fold,
+    ] {
+        let mut c3d = cfg;
+        c3d.style = style;
+        let pose = compute_workspace_3d_pose(
+            1,
+            0.4,
+            2.0,
+            0.95,
+            0.0,
+            0.0,
+            Size::from((1920., 1080.)),
+            c3d,
+            18.0,
+            1.0,
+        )
+        .expect("visible workspace should have a 3D pose");
+        assert!(pose.center_y.is_finite());
+        assert!(pose.rotate_x.is_finite());
+        assert!(pose.focal > 100.0);
+    }
 }
 
 fn advance_animations(layout: &mut Layout<TestWindow>, msec: u64) {

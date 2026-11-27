@@ -12,6 +12,8 @@ pub use spring::{Spring, SpringParams};
 mod clock;
 pub use clock::Clock;
 
+pub mod impulse;
+
 #[derive(Debug, Clone)]
 pub struct Animation {
     from: f64,
@@ -46,9 +48,12 @@ enum Kind {
 #[derive(Debug, Clone, Copy)]
 pub enum Curve {
     Linear,
+    EaseInQuad,
     EaseOutQuad,
     EaseOutCubic,
+    EaseInOutCubic,
     EaseOutExpo,
+    EaseOutBack,
     CubicBezier(CubicBezier),
 }
 
@@ -378,15 +383,17 @@ impl Animation {
             Kind::Spring { spring, time_scale } => {
                 let value = spring.value_at(passed.mul_f64(time_scale));
 
-                // Protect against numerical instability.
-                let range = (self.to - self.from) * 10.;
-                let a = self.from - range;
-                let b = self.to + range;
-                if self.from <= self.to {
-                    value.clamp(a, b)
-                } else {
-                    value.clamp(b, a)
-                }
+                // Protect against numerical instability (also allow impulse springs where
+                // `from == to` with non-zero initial velocity).
+                let omega0 = (spring.params.stiffness / spring.params.mass)
+                    .sqrt()
+                    .max(1.);
+                let impulse_span = (self.initial_velocity.abs() / omega0) * 4.;
+                let span = (self.to - self.from).abs().max(impulse_span);
+                let range = span * 10.;
+                let min_v = self.from.min(self.to) - range;
+                let max_v = self.from.max(self.to) + range;
+                value.clamp(min_v, max_v)
             }
             Kind::Deceleration {
                 initial_velocity,
@@ -401,6 +408,46 @@ impl Animation {
 
     pub fn value(&self) -> f64 {
         self.value_at(self.clock.now())
+    }
+
+    /// Instantaneous velocity (units per second) at time `at`.
+    pub fn velocity_at(&self, at: Duration) -> f64 {
+        if self.is_off
+            || self.clock.should_complete_instantly()
+            || at <= self.start_time
+            || at >= self.start_time + self.duration
+        {
+            return 0.;
+        }
+
+        let passed = at.saturating_sub(self.start_time);
+        match self.kind {
+            Kind::Spring { spring, time_scale } => {
+                spring.velocity_at(passed.mul_f64(time_scale)) * time_scale
+            }
+            Kind::Easing { .. } | Kind::Deceleration { .. } => {
+                let dt = Duration::from_micros(500);
+                let t0 = at.saturating_sub(dt);
+                let t1 = at.saturating_add(dt);
+                let span = t1.saturating_sub(t0).as_secs_f64();
+                if span <= f64::EPSILON {
+                    0.
+                } else {
+                    (self.value_at(t1) - self.value_at(t0)) / span
+                }
+            }
+        }
+    }
+
+    /// Instantaneous velocity (units per second) at the current clock time.
+    pub fn velocity(&self) -> f64 {
+        self.velocity_at(self.clock.now())
+    }
+
+    /// Shifts this animation's start time (used for zero-drift multi-phase handoffs).
+    pub fn with_start_time(mut self, start_time: Duration) -> Self {
+        self.start_time = start_time;
+        self
     }
 
     /// Returns a value that stops at the target value after first reaching it.
@@ -449,9 +496,23 @@ impl Curve {
     pub fn y(self, x: f64) -> f64 {
         match self {
             Curve::Linear => x,
+            Curve::EaseInQuad => x * x,
             Curve::EaseOutQuad => EaseOutQuad.y(x),
             Curve::EaseOutCubic => EaseOutCubic.y(x),
+            Curve::EaseInOutCubic => {
+                if x < 0.5 {
+                    4. * x * x * x
+                } else {
+                    1. - (-2. * x + 2.).powi(3) / 2.
+                }
+            }
             Curve::EaseOutExpo => 1. - 2f64.powf(-10. * x),
+            Curve::EaseOutBack => {
+                const C1: f64 = 1.70158;
+                const C3: f64 = C1 + 1.;
+                let xm1 = x - 1.;
+                1. + C3 * xm1 * xm1 * xm1 + C1 * xm1 * xm1
+            }
             Curve::CubicBezier(b) => b.y(x),
         }
     }
@@ -461,9 +522,12 @@ impl From<niri_config::animations::Curve> for Curve {
     fn from(value: niri_config::animations::Curve) -> Self {
         match value {
             niri_config::animations::Curve::Linear => Curve::Linear,
+            niri_config::animations::Curve::EaseInQuad => Curve::EaseInQuad,
             niri_config::animations::Curve::EaseOutQuad => Curve::EaseOutQuad,
             niri_config::animations::Curve::EaseOutCubic => Curve::EaseOutCubic,
+            niri_config::animations::Curve::EaseInOutCubic => Curve::EaseInOutCubic,
             niri_config::animations::Curve::EaseOutExpo => Curve::EaseOutExpo,
+            niri_config::animations::Curve::EaseOutBack => Curve::EaseOutBack,
             niri_config::animations::Curve::CubicBezier(x1, y1, x2, y2) => {
                 Curve::CubicBezier(CubicBezier::new(x1, y1, x2, y2))
             }

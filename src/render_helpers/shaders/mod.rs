@@ -16,6 +16,8 @@ pub struct Shaders {
     pub picker_card: Option<ShaderProgram>,
     pub picker_glass: Option<ShaderProgram>,
     pub picker_blur: Option<GlesTexProgram>,
+    pub tile_focus: Option<ShaderProgram>,
+    pub workspace_3d: Option<ShaderProgram>,
     pub clipped_surface: Option<GlesTexProgram>,
     pub postprocess_and_clip: Option<GlesTexProgram>,
     pub resize: Option<ShaderProgram>,
@@ -32,6 +34,8 @@ pub enum ProgramType {
     Shadow,
     PickerCard,
     PickerGlass,
+    TileFocus,
+    Workspace3D,
     Resize,
     Close,
     Open,
@@ -159,6 +163,51 @@ impl Shaders {
         })
         .ok();
 
+        let tile_focus = ShaderProgram::compile(
+            renderer,
+            include_str!("tile_focus.frag"),
+            &[
+                UniformName::new("src_size", UniformType::_2f),
+                UniformName::new("tex_size", UniformType::_2f),
+                UniformName::new("src_pivot", UniformType::_2f),
+                UniformName::new("dest_size", UniformType::_2f),
+                UniformName::new("dest_center", UniformType::_2f),
+                UniformName::new("persp_half_size", UniformType::_2f),
+                UniformName::new("scale_xy", UniformType::_2f),
+                UniformName::new("tilt", UniformType::_2f),
+                UniformName::new("brightness_pulse", UniformType::_1f),
+            ],
+            &["tex"],
+        )
+        .map_err(|err| {
+            warn!("error compiling tile focus shader: {err:?}");
+        })
+        .ok();
+
+        let workspace_3d = ShaderProgram::compile(
+            renderer,
+            include_str!("workspace_3d.frag"),
+            &[
+                UniformName::new("view_size", UniformType::_2f),
+                UniformName::new("view_origin", UniformType::_2f),
+                UniformName::new("tex_size", UniformType::_2f),
+                UniformName::new("dest_size", UniformType::_2f),
+                UniformName::new("center_y", UniformType::_1f),
+                UniformName::new("z_offset", UniformType::_1f),
+                UniformName::new("rotate_x", UniformType::_1f),
+                UniformName::new("focal", UniformType::_1f),
+                UniformName::new("ws_scale", UniformType::_2f),
+                UniformName::new("corner_radius", UniformType::_1f),
+                UniformName::new("dim_amount", UniformType::_1f),
+                UniformName::new("sheen_strength", UniformType::_1f),
+            ],
+            &["tex"],
+        )
+        .map_err(|err| {
+            warn!("error compiling workspace 3d shader: {err:?}");
+        })
+        .ok();
+
         let clipped_surface = renderer
             .compile_custom_texture_shader(
                 concat!(
@@ -264,6 +313,8 @@ impl Shaders {
             picker_card,
             picker_glass,
             picker_blur,
+            tile_focus,
+            workspace_3d,
             clipped_surface,
             postprocess_and_clip,
             resize,
@@ -315,6 +366,8 @@ impl Shaders {
             ProgramType::Shadow => self.shadow.clone(),
             ProgramType::PickerCard => self.picker_card.clone(),
             ProgramType::PickerGlass => self.picker_glass.clone(),
+            ProgramType::TileFocus => self.tile_focus.clone(),
+            ProgramType::Workspace3D => self.workspace_3d.clone(),
             ProgramType::Resize => self
                 .custom_resize
                 .borrow()

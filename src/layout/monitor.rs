@@ -17,6 +17,7 @@ use super::workspace::{
     compute_working_area, OutputId, Workspace, WorkspaceAddWindowTarget, WorkspaceId,
     WorkspaceRenderElement,
 };
+use super::workspace_effects::{Workspace3DEngineATransform, WorkspaceEffectsState};
 use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Options};
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
@@ -24,7 +25,8 @@ use crate::layout::RenderLayer;
 use crate::niri_render_elements;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
-use crate::render_helpers::solid_color::SolidColorRenderElement;
+use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use crate::render_helpers::workspace_3d::{compute_workspace_3d_pose, Workspace3DPose};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::RenderCtx;
 use crate::rubber_band::RubberBand;
@@ -79,10 +81,11 @@ pub struct Monitor<W: LayoutElement> {
     insert_hint_render_loc: Option<InsertHintRenderLoc>,
     /// Whether the overview is open.
     pub(super) overview_open: bool,
-    /// Ongoing independent workspace dip animation, see `workspace-dip` config.
-    workspace_dip: Option<WorkspaceDipAnim>,
-    /// Rubber-band nudge when trying to switch past the first/last workspace.
-    bounce: Option<WorkspaceBounce>,
+    /// Self-contained workspace transition effects (dip, 3D buffer pool, velocity tracker,
+    /// bounce).
+    pub(crate) ws_effects: WorkspaceEffectsState,
+    /// Latest pointer position relative to this output (for pointer-press focus 3D tilt).
+    last_pointer_pos: Option<Point<f64, Logical>>,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
     /// Clock for driving animations.
@@ -99,29 +102,6 @@ pub struct Monitor<W: LayoutElement> {
 pub enum WorkspaceSwitch {
     Animation(Animation),
     Gesture(WorkspaceSwitchGesture),
-}
-
-/// Independent workspace dip animation state (two-phase: shrink then expand).
-#[derive(Debug)]
-struct WorkspaceDipAnim {
-    phase: DipPhase,
-    anim: Animation,
-}
-
-/// Out-and-back rubber-band offset for the view, in logical pixels.
-#[derive(Debug)]
-struct WorkspaceBounce {
-    anim: Animation,
-    /// +1 nudges the view down (attempted switch down at the last workspace), -1 up.
-    dir: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DipPhase {
-    /// Zooming from 1 down to `1 - strength`.
-    Shrinking,
-    /// Zooming back from the current depth to 1.
-    Expanding,
 }
 
 #[derive(Debug)]
@@ -368,8 +348,8 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_element: InsertHintElement::new(options.layout.insert_hint),
             insert_hint_render_loc: None,
             overview_open: false,
-            workspace_dip: None,
-            bounce: None,
+            ws_effects: WorkspaceEffectsState::default(),
+            last_pointer_pos: None,
             overview_progress: None,
             workspace_switch: None,
             clock,
@@ -395,6 +375,14 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn output_name(&self) -> &String {
         &self.output_name
+    }
+
+    pub fn last_pointer_pos(&self) -> Option<Point<f64, Logical>> {
+        self.last_pointer_pos
+    }
+
+    pub fn set_pointer_pos(&mut self, pos: Option<Point<f64, Logical>>) {
+        self.last_pointer_pos = pos;
     }
 
     pub fn active_workspace_idx(&self) -> usize {
@@ -533,7 +521,12 @@ impl<W: LayoutElement> Monitor<W> {
                     0.,
                     config,
                 )));
-                self.start_workspace_dip();
+                self.ws_effects.on_workspace_switch_start(
+                    self.clock.clone(),
+                    &self.options.layout.workspace_dip,
+                    current_idx,
+                    idx as f64,
+                );
             }
         }
     }
@@ -541,27 +534,12 @@ impl<W: LayoutElement> Monitor<W> {
     /// Start a rubber-band nudge in `dir` (+1 down / -1 up). Used when a workspace switch is
     /// attempted past the first/last workspace: the view moves a little and springs back.
     fn start_workspace_bounce(&mut self, dir: f64) {
-        let anim = Animation::ease(
-            self.clock.clone(),
-            0.,
-            1.,
-            0.,
-            280,
-            crate::animation::Curve::EaseOutCubic,
-        );
-        self.bounce = Some(WorkspaceBounce { anim, dir });
+        self.ws_effects.start_bounce(self.clock.clone(), dir);
     }
 
     /// Current rubber-band Y offset for the view (0 outside of a bounce).
     fn workspace_bounce_offset_y(&self) -> f64 {
-        const AMPLITUDE: f64 = 26.;
-        match &self.bounce {
-            Some(bounce) => {
-                let t = bounce.anim.clamped_value();
-                bounce.dir * AMPLITUDE * (t * std::f64::consts::PI).sin()
-            }
-            None => 0.,
-        }
+        self.ws_effects.bounce_offset_y()
     }
 
     pub(super) fn resolve_add_window_target<'a>(
@@ -1117,12 +1095,6 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn advance_animations(&mut self) {
-        if let Some(bounce) = &self.bounce {
-            if bounce.anim.is_done() {
-                self.bounce = None;
-            }
-        }
-
         match &mut self.workspace_switch {
             Some(WorkspaceSwitch::Animation(anim)) => {
                 if anim.is_done() {
@@ -1157,7 +1129,20 @@ impl<W: LayoutElement> Monitor<W> {
             None => (),
         }
 
-        self.advance_workspace_dip();
+        let render_idx = self.workspace_render_idx();
+        let (switch_anim, is_gesture) = match &self.workspace_switch {
+            Some(WorkspaceSwitch::Animation(a)) => (Some(a), false),
+            Some(WorkspaceSwitch::Gesture(_)) => (None, true),
+            None => (None, false),
+        };
+        self.ws_effects.advance(
+            &self.clock,
+            &self.options.layout.workspace_dip,
+            render_idx,
+            switch_anim,
+            is_gesture,
+            self.workspace_switch.is_some(),
+        );
 
         for ws in &mut self.workspaces {
             ws.advance_animations();
@@ -1168,8 +1153,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_switch
             .as_ref()
             .is_some_and(|s| s.is_animation_ongoing())
-            || self.workspace_dip.is_some()
-            || self.bounce.is_some()
+            || self.ws_effects.is_animating()
             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
     }
 
@@ -1453,12 +1437,21 @@ impl<W: LayoutElement> Monitor<W> {
     fn workspace_size(&self, zoom: f64) -> Size<f64, Logical> {
         let ws_size = self.view_size.upscale(zoom);
         let scale = self.scale.fractional_scale();
-        ws_size.to_physical_precise_ceil(scale).to_logical(scale)
+        // Use nearest-pixel rounding instead of ceil so fine dip settle tails don't step by 1px.
+        ws_size.to_physical_precise_round(scale).to_logical(scale)
     }
 
     fn workspace_gap(&self, zoom: f64) -> f64 {
         let scale = self.scale.fractional_scale();
-        let gap = self.view_size.h * 0.1 * zoom;
+        let mut gap = self.view_size.h * 0.1 * zoom;
+        let cfg3d = self.options.layout.workspace_switch_3d;
+        if cfg3d.enabled
+            && cfg3d.gap_compression > 0.
+            && (self.workspace_switch.is_some() || self.ws_effects.is_dip_active())
+        {
+            let fade = self.overview_fade();
+            gap *= 1. - cfg3d.gap_compression.clamp(0., 1.) * 0.85 * fade;
+        }
         round_logical_in_physical_max1(scale, gap)
     }
 
@@ -1467,181 +1460,181 @@ impl<W: LayoutElement> Monitor<W> {
         self.workspace_size(zoom) + Size::from((0., gap))
     }
 
+    /// Smooth fade weight `1.0 -> 0.0` as the overview opens, preventing sudden 1-frame pops.
+    pub(crate) fn overview_fade(&self) -> f64 {
+        1. - self
+            .overview_progress
+            .as_ref()
+            .map_or(0., |p| p.clamped_value().clamp(0., 1.))
+    }
+
+    /// Current normalized dip depth (0 at rest, ~1 at peak).
+    pub(crate) fn current_dip_depth(&self) -> f64 {
+        let render_idx = self.workspace_render_idx();
+        let (switch_anim, is_gesture) = match &self.workspace_switch {
+            Some(WorkspaceSwitch::Animation(a)) => (Some(a), false),
+            Some(WorkspaceSwitch::Gesture(_)) => (None, true),
+            None => (None, false),
+        };
+        self.ws_effects.current_dip_depth(
+            &self.clock,
+            &self.options.layout.workspace_dip,
+            render_idx,
+            switch_anim,
+            is_gesture,
+            self.overview_fade(),
+        )
+    }
+
     pub fn overview_zoom(&self) -> f64 {
         let progress = self.overview_progress.as_ref().map(|p| p.value());
         let zoom = compute_overview_zoom(&self.options, progress);
-        self.with_workspace_switch_dip(zoom)
+        let depth = self.current_dip_depth();
+        self.ws_effects
+            .apply_dip_zoom(zoom, &self.options.layout.workspace_dip, depth)
     }
 
-    /// Scales the zoom down while a workspace switch animation is running.
-    ///
-    /// The dip starts and ends at 1, reaching the minimum zoom in the middle of the switch.
-    fn with_workspace_switch_dip(&self, zoom: f64) -> f64 {
-        let dip = &self.options.layout.workspace_dip;
-        if !dip.enabled || dip.strength <= 0. {
-            return zoom;
-        }
-
-        // Don't fight the overview zoom; it has its own animation.
-        if self.overview_progress.is_some() {
-            return zoom;
-        }
-
-        let depth = if dip.anim.is_some() {
-            // Independent timing: driven by our own two-phase animation.
-            match &self.workspace_dip {
-                Some(state) => state.anim.clamped_value(),
-                None => return zoom,
-            }
-        } else {
-            // Follow the workspace switch animation progress.
-            let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch else {
-                return zoom;
-            };
-
-            let from = anim.from();
-            let to = anim.to();
-            if from == to {
-                return zoom;
-            }
-
-            let progress = ((anim.value() - from) / (to - from)).clamp(0., 1.);
-            f64::sin(std::f64::consts::PI * progress)
-        };
-
-        zoom * (1. - dip.strength * depth.clamp(0., 1.))
-    }
-
-    /// Per-workspace 3D depth scale for the `workspace-switch-3d` effect ("N6").
-    ///
-    /// Returns `None` when the effect is disabled or not applicable (e.g. while the overview is
-    /// open or animating). When `Some`, the returned scale recedes workspaces away from the
-    /// center of the screen: workspaces farther from the center are smaller (and optionally
-    /// squashed vertically, a cheap 2D approximation of a rotateX tilt). The scale is meant to
-    /// be applied about the workspace's own center.
-    pub(crate) fn workspace_3d_scale(&self, geo: Rectangle<f64, Logical>) -> Option<Scale<f64>> {
-        let cfg = self.options.layout.workspace_switch_3d;
-        if !cfg.enabled {
-            return None;
-        }
-
-        // Only during workspace switches; not while the overview is open or animating.
-        if self.overview_progress.is_some() || self.workspace_switch.is_none() {
-            return None;
-        }
-
-        if cfg.depth >= 1. && cfg.squash >= 1. {
-            return None;
-        }
-
-        let out_h = self.view_size.h;
-        if out_h <= 0. {
-            return None;
-        }
-
-        // How far the workspace center is from the center of the output, in screen heights.
-        let center_y = geo.loc.y + geo.size.h / 2.;
-        let distance = (center_y - out_h / 2.).abs() / out_h;
-
-        // Ramp from no effect (0) to the full effect over `radius` screen heights.
-        let t = (distance / cfg.radius.max(f64::EPSILON)).clamp(0., 1.);
-        let eased = t.powf(cfg.curve_power.max(0.));
-
-        let depth = 1. - (1. - cfg.depth) * eased;
-        let squash = 1. - (1. - cfg.squash) * eased;
-
-        Some(Scale::from((depth, depth * squash)))
-    }
-
-    /// Returns `(shrink, expand)` animation configs for the independent dip mode.
-    ///
-    /// For easing animations, the configured duration is split between the two phases.
-    fn workspace_dip_anim_configs(
+    /// Engine A (zero-FBO) 2.5D transform for a workspace, supporting hinge pivot, parallax
+    /// depth, and dimming.
+    pub(crate) fn workspace_3d_engine_a(
         &self,
-    ) -> Option<(niri_config::Animation, niri_config::Animation)> {
-        let anim = self.options.layout.workspace_dip.anim?;
-        use niri_config::animations::Kind as ConfigKind;
-        let configs = match anim.kind {
-            ConfigKind::Easing(p) => {
-                let half = p.duration_ms.div_ceil(2).max(1);
-                (
-                    niri_config::Animation {
-                        off: false,
-                        kind: ConfigKind::Easing(niri_config::animations::EasingParams {
-                            duration_ms: half,
-                            curve: p.curve,
-                        }),
-                    },
-                    niri_config::Animation {
-                        off: false,
-                        kind: ConfigKind::Easing(niri_config::animations::EasingParams {
-                            duration_ms: p.duration_ms.saturating_sub(half).max(1),
-                            curve: p.curve,
-                        }),
-                    },
-                )
-            }
-            ConfigKind::Spring(p) => (
-                niri_config::Animation {
-                    off: false,
-                    kind: ConfigKind::Spring(p),
-                },
-                niri_config::Animation {
-                    off: false,
-                    kind: ConfigKind::Spring(p),
-                },
-            ),
-        };
-        Some(configs)
+        geo: Rectangle<f64, Logical>,
+        layer_parallax_scale: f64,
+    ) -> Option<Workspace3DEngineATransform> {
+        if self.workspace_switch.is_none() && !self.ws_effects.is_dip_active() {
+            return None;
+        }
+        let fade = self.overview_fade();
+        WorkspaceEffectsState::engine_a_transform(
+            geo,
+            self.view_size.h,
+            self.options.layout.workspace_switch_3d,
+            fade,
+            layer_parallax_scale,
+        )
     }
 
-    /// Starts (or restarts mid-flight) the shrink phase of the dip.
-    ///
-    /// Called whenever a new workspace switch animation starts.
-    fn start_workspace_dip(&mut self) {
-        if self.options.layout.workspace_dip.anim.is_none() {
-            return;
-        }
-
-        let current = self
-            .workspace_dip
-            .as_ref()
-            .map_or(0., |state| state.anim.clamped_value());
-
-        if let Some((shrink, _)) = self.workspace_dip_anim_configs() {
-            self.workspace_dip = Some(WorkspaceDipAnim {
-                phase: DipPhase::Shrinking,
-                anim: Animation::new(self.clock.clone(), current, 1., 0., shrink),
-            });
-        }
+    /// Returns whether Engine B (true 3D ray-plane homography perspective shader) is active for
+    /// this frame. Always `false` at rest so resting frames stay 100% zero-FBO / direct scanout.
+    pub(crate) fn is_workspace_3d_shader_active(&self) -> bool {
+        let cfg = self.options.layout.workspace_switch_3d;
+        cfg.enabled
+            && cfg.style.uses_perspective_shader()
+            && self.overview_fade() > 1e-4
+            && (self.workspace_switch.is_some()
+                || self.ws_effects.is_dip_active()
+                || (cfg.bounce_3d && self.ws_effects.is_bounce_active()))
     }
 
-    /// Advances the dip state machine: transitions shrink -> expand and cleans up when done.
-    ///
-    /// The dip always runs to completion even if the workspace switch finishes first, so the
-    /// configured duration is exact.
-    fn advance_workspace_dip(&mut self) {
-        let is_done = self
-            .workspace_dip
-            .as_ref()
-            .is_some_and(|state| state.anim.is_done());
-        if !is_done {
-            return;
+    /// Returns `(backdrop_dim_alpha, backdrop_parallax_scale)` driven by `workspace-dip`.
+    pub(crate) fn dip_backdrop_effects(&self) -> (f32, f64) {
+        let dip_cfg = &self.options.layout.workspace_dip;
+        if !dip_cfg.enabled {
+            return (0.0, 1.0);
         }
+        let depth = self.current_dip_depth().clamp(0., 1.);
+        if depth <= 1e-4 {
+            return (0.0, 1.0);
+        }
+        let dim = (dip_cfg.backdrop_dim * depth as f32).clamp(0., 0.85);
+        let parallax = (1.0 + (dip_cfg.backdrop_parallax - 1.0) * depth).clamp(0.5, 1.5);
+        (dim, parallax)
+    }
 
-        let phase = self.workspace_dip.as_ref().unwrap().phase;
-        match phase {
-            DipPhase::Shrinking => {
-                if let Some((_, expand)) = self.workspace_dip_anim_configs() {
-                    let state = self.workspace_dip.as_mut().unwrap();
-                    state.phase = DipPhase::Expanding;
-                    state.anim = Animation::new(self.clock.clone(), 1., 0., 0., expand);
+    pub(crate) fn workspace_3d_config(&self) -> niri_config::WorkspaceSwitch3D {
+        self.options.layout.workspace_switch_3d
+    }
+
+    /// Computes front-to-back sorted Engine B 3D poses for all visible workspaces.
+    pub(crate) fn workspace_3d_poses(&self) -> Vec<(usize, &Workspace<W>, Workspace3DPose)> {
+        let cfg = self.options.layout.workspace_switch_3d;
+        let dip_cfg = &self.options.layout.workspace_dip;
+        let fade = self.overview_fade();
+        let render_idx = self.workspace_render_idx();
+        let velocity = self.ws_effects.switch_velocity();
+        let zoom = self.overview_zoom();
+        let bounce_y = self.workspace_bounce_offset_y();
+        let bounce_norm = self.ws_effects.bounce_norm();
+
+        let mut list: Vec<_> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ws)| {
+                let pose = compute_workspace_3d_pose(
+                    idx,
+                    render_idx,
+                    velocity,
+                    zoom,
+                    bounce_y,
+                    bounce_norm,
+                    self.view_size,
+                    cfg,
+                    dip_cfg.corner_radius,
+                    fade,
+                )?;
+                Some((idx, ws, pose))
+            })
+            .collect();
+
+        // Front-to-back push order (smaller `sort_z` = closer to viewer, pushed first).
+        list.sort_by(|a, b| a.2.sort_z.total_cmp(&b.2.sort_z));
+        list
+    }
+
+    /// Renders only windows currently moving between workspaces (pass 0 & pass 2) so Engine B
+    /// can composite them cleanly in the foreground above 3D-rotated workspaces.
+    pub fn render_moving_windows_between_workspaces<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        focus_ring: bool,
+        push: &mut dyn FnMut(MonitorRenderElement<R>),
+    ) {
+        let scale = self.scale.fractional_scale();
+        let zoom = self.overview_zoom();
+        let crop_bounds = Rectangle::new(
+            Point::from((-i32::MAX / 2, -i32::MAX / 2)),
+            Size::from((i32::MAX, i32::MAX)),
+        );
+
+        for pass in [0usize, 2usize] {
+            for (ws, geo) in self.workspaces_with_render_geo_cull(false) {
+                let xray_pos = XrayPos::new(geo.loc, zoom);
+                let mut emit = |elem| {
+                    if let Some(elem) = CropRenderElement::from_element(elem, scale, crop_bounds) {
+                        let elem = MonitorInnerRenderElement::from(elem);
+                        let elem =
+                            RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
+                        let elem = RelocateRenderElement::from_element(
+                            elem,
+                            geo.loc.to_physical_precise_round(scale),
+                            Relocate::Relative,
+                        );
+                        let elem = RescaleRenderElement::from_element(
+                            elem,
+                            Point::from((0, 0)),
+                            Scale::from(1.),
+                        );
+                        push(elem);
+                    }
+                };
+                if pass == 0 {
+                    ws.render_floating(
+                        ctx.r(),
+                        xray_pos,
+                        focus_ring,
+                        RenderLayer::MovingBetweenWorkspaces,
+                        &mut emit,
+                    );
                 } else {
-                    self.workspace_dip = None;
+                    ws.render_scrolling(
+                        ctx.r(),
+                        xray_pos,
+                        focus_ring,
+                        RenderLayer::MovingBetweenWorkspaces,
+                        &mut emit,
+                    );
                 }
-            }
-            DipPhase::Expanding => {
-                self.workspace_dip = None;
             }
         }
     }
@@ -1840,14 +1833,18 @@ impl<W: LayoutElement> Monitor<W> {
 
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
         let (ws, geo) = self.workspace_under(pos_within_output)?;
+        let zoom = self.overview_zoom();
 
         if self.overview_progress.is_some() {
-            let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
             let (win, hit) = ws.window_under(pos_within_workspace)?;
             // During the overview animation, we cannot do input hits because we cannot really
             // represent scaled windows properly.
             Some((win, hit.to_activate()))
+        } else if (zoom - 1.).abs() > 1e-4 {
+            let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
+            let (win, hit) = ws.window_under(pos_within_workspace)?;
+            Some((win, hit.offset_win_pos(geo.loc)))
         } else {
             let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
             Some((win, hit.offset_win_pos(geo.loc)))
@@ -1913,8 +1910,11 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn fullscreen_window_above_top_layer(&self) -> Option<&W> {
-        // Render above the top layer only if the view is stationary.
-        if self.workspace_switch.is_some() || self.overview_progress.is_some() {
+        // Render above the top layer only if the view is completely stationary.
+        if self.workspace_switch.is_some()
+            || self.overview_progress.is_some()
+            || self.ws_effects.is_animating()
+        {
             return None;
         }
 
@@ -1972,7 +1972,10 @@ impl<W: LayoutElement> Monitor<W> {
             .insert_hint_render_loc
             .filter(|_| !self.options.layout.insert_hint.off);
 
-        let scale_relocate = move |geo: Rectangle<f64, Logical>, depth: Scale<f64>, elem| {
+        let scale_relocate = move |geo: Rectangle<f64, Logical>,
+                                   pivot: Point<f64, Logical>,
+                                   depth: Scale<f64>,
+                                   elem| {
             let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
             let elem = RelocateRenderElement::from_element(
                 elem,
@@ -1983,12 +1986,10 @@ impl<W: LayoutElement> Monitor<W> {
                 Relocate::Relative,
             );
 
-            // N6: recede the whole workspace about its own center so that it shrinks
-            // (and optionally squashes vertically) as it moves away from the screen center.
-            let center =
-                (geo.loc + geo.size.to_point().downscale(2.)).to_physical_precise_round(scale);
-            RescaleRenderElement::from_element(elem, center, depth)
+            RescaleRenderElement::from_element(elem, pivot.to_physical_precise_round(scale), depth)
         };
+
+        let cfg3d = self.options.layout.workspace_switch_3d;
 
         // Draw in passes for correct Z ordering during window movement between workspaces:
         // - floating windows moving between workspaces
@@ -2000,36 +2001,59 @@ impl<W: LayoutElement> Monitor<W> {
             // workspaces off-screen will still render.
             let cull = matches!(pass, 1 | 3);
 
-            // Crop the elements to prevent them overflowing, currently visible during a workspace
-            // switch.
-            //
-            // HACK: crop to infinite bounds at least horizontally where we
-            // know there's no workspace joining or monitor bounds, otherwise
-            // it will cut pixel shaders and mess up the coordinate space.
-            // There's also a damage tracking bug which causes glitched
-            // rendering for maximized GTK windows.
-            //
-            // FIXME: use proper bounds after fixing the Crop element.
-            //
-            // Also, check cull here to avoid cropping windows moving between workspaces.
-            //
-            // FIXME: for cull=true, it might be better visually to crop to a workspace-high region
-            // anchored to the window/column as it moves between workspaces, to prevent overflowing
-            // windows from appearing and disappearing.
-            let crop_bounds =
-                if cull && (self.workspace_switch.is_some() || self.overview_progress.is_some()) {
-                    Rectangle::new(
-                        Point::from((-i32::MAX / 2, 0)),
-                        Size::from((i32::MAX, height)),
-                    )
-                } else {
-                    Rectangle::new(
-                        Point::from((-i32::MAX / 2, -i32::MAX / 2)),
-                        Size::from((i32::MAX, i32::MAX)),
-                    )
-                };
+            let crop_bounds = if cull
+                && (self.workspace_switch.is_some()
+                    || self.overview_progress.is_some()
+                    || self.ws_effects.is_animating())
+            {
+                Rectangle::new(
+                    Point::from((-i32::MAX / 2, 0)),
+                    Size::from((i32::MAX, height)),
+                )
+            } else {
+                Rectangle::new(
+                    Point::from((-i32::MAX / 2, -i32::MAX / 2)),
+                    Size::from((i32::MAX, i32::MAX)),
+                )
+            };
+
+            // Layer parallax modulation for Engine A: floating windows float subtly closer than
+            // tiling windows, and moving windows stay un-squashed in the foreground when exempt.
+            let exempt = !cull && cfg3d.exempt_moving_windows;
+            let layer_parallax_scale = if matches!(pass, 0 | 1) {
+                1. - cfg3d.parallax * 0.35
+            } else {
+                1.
+            };
 
             for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
+                let default_center = geo.loc + geo.size.to_point().downscale(2.);
+                let tf3d = if exempt {
+                    None
+                } else {
+                    self.workspace_3d_engine_a(geo, layer_parallax_scale)
+                };
+                let (pivot, depth) =
+                    tf3d.map_or((default_center, Scale::from(1.)), |tf| (tf.pivot, tf.scale));
+
+                // Engine A depth dimming overlay pushed right above each workspace's windows.
+                if pass == 1 {
+                    if let Some(tf) = tf3d {
+                        if tf.dim_alpha > 0.002 {
+                            let dim_buf =
+                                SolidColorBuffer::new(self.view_size, [0., 0., 0., tf.dim_alpha]);
+                            let dim_elem = SolidColorRenderElement::from_buffer(
+                                &dim_buf,
+                                Point::from((0., 0.)),
+                                1.,
+                                smithay::backend::renderer::element::Kind::Unspecified,
+                            );
+                            let elem = MonitorInnerRenderElement::SolidColor(dim_elem);
+                            push(scale_relocate(geo, pivot, depth, elem));
+                        }
+                    }
+                }
+
                 // Macro instead of closure because ws and insert hint have different elem types.
                 macro_rules! push {
                     () => {{
@@ -2037,14 +2061,13 @@ impl<W: LayoutElement> Monitor<W> {
                             let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
                             if let Some(elem) = elem {
                                 let elem = MonitorInnerRenderElement::from(elem);
-                                let depth = self.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
-                                push(scale_relocate(geo, depth, elem));
+                                push(scale_relocate(geo, pivot, depth, elem));
                             }
                         }
                     }};
                 }
 
-                let xray_pos = XrayPos::new(geo.loc, zoom);
+                let xray_pos = XrayPos::new(geo.loc, zoom).with_3d(pivot, depth);
 
                 match pass {
                     0 => {
@@ -2103,10 +2126,33 @@ impl<W: LayoutElement> Monitor<W> {
         renderer: &mut R,
         push: &mut dyn FnMut(MonitorRenderElement<R>),
     ) {
-        let Some(progress) = self.overview_progress.as_ref().map(|p| p.clamped_value()) else {
-            return;
+        let overview_alpha = self
+            .overview_progress
+            .as_ref()
+            .map_or(0.0, |p| p.clamped_value().clamp(0., 1.) as f32);
+
+        let dip_cfg = &self.options.layout.workspace_dip;
+        let dip_alpha = if dip_cfg.enabled && dip_cfg.shadow_opacity > 0.001 {
+            (self.current_dip_depth().clamp(0., 1.) as f32) * dip_cfg.shadow_opacity
+        } else {
+            0.0
         };
-        let alpha = progress.clamp(0., 1.) as f32;
+
+        let cfg3d = self.options.layout.workspace_switch_3d;
+        let ws3d_alpha = if cfg3d.enabled
+            && !cfg3d.style.uses_perspective_shader()
+            && cfg3d.shadow_opacity > 0.001
+            && (self.workspace_switch.is_some() || self.ws_effects.is_dip_active())
+        {
+            cfg3d.shadow_opacity * (self.overview_fade() as f32)
+        } else {
+            0.0
+        };
+
+        let alpha = overview_alpha.max(dip_alpha).max(ws3d_alpha).clamp(0., 1.);
+        if alpha <= 0.002 {
+            return;
+        }
 
         let _span = tracy_client::span!("Monitor::render_workspace_shadows");
 
@@ -2114,6 +2160,11 @@ impl<W: LayoutElement> Monitor<W> {
         let zoom = self.overview_zoom();
 
         for (ws, geo) in self.workspaces_with_render_geo() {
+            let default_center = geo.loc + geo.size.to_point().downscale(2.);
+            let (pivot, depth) = self
+                .workspace_3d_engine_a(geo, 1.0)
+                .map_or((default_center, Scale::from(1.)), |tf| (tf.pivot, tf.scale));
+
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
@@ -2123,10 +2174,11 @@ impl<W: LayoutElement> Monitor<W> {
                     geo.loc.to_physical_precise_round(scale),
                     Relocate::Relative,
                 );
-                // Identity depth wrapper to match the MonitorRenderElement type.
-                let center =
-                    (geo.loc + geo.size.to_point().downscale(2.)).to_physical_precise_round(scale);
-                let elem = RescaleRenderElement::from_element(elem, center, Scale::from(1.));
+                let elem = RescaleRenderElement::from_element(
+                    elem,
+                    pivot.to_physical_precise_round(scale),
+                    depth,
+                );
                 push(elem);
             });
         }
@@ -2148,6 +2200,11 @@ impl<W: LayoutElement> Monitor<W> {
             dnd_nonzero_start_time: None,
         };
         self.workspace_switch = Some(WorkspaceSwitch::Gesture(gesture));
+        self.ws_effects.on_gesture_begin(
+            self.clock.clone(),
+            &self.options.layout.workspace_dip,
+            current_idx,
+        );
     }
 
     pub fn dnd_scroll_gesture_begin(&mut self) {
@@ -2180,6 +2237,11 @@ impl<W: LayoutElement> Monitor<W> {
             dnd_nonzero_start_time: None,
         };
         self.workspace_switch = Some(WorkspaceSwitch::Gesture(gesture));
+        self.ws_effects.on_gesture_begin(
+            self.clock.clone(),
+            &self.options.layout.workspace_dip,
+            current_idx,
+        );
     }
 
     pub fn workspace_switch_gesture_update(
@@ -2365,15 +2427,21 @@ impl<W: LayoutElement> Monitor<W> {
             crate::sounds::play(&self.options.sounds, crate::sounds::Kind::WorkspaceSwitch);
         }
 
+        let from_idx = gesture.current_idx;
         self.active_workspace_idx = new_idx;
         self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
             self.clock.clone(),
-            gesture.current_idx,
+            from_idx,
             new_idx as f64,
             velocity,
             self.options.animations.workspace_switch.0,
         )));
-        self.start_workspace_dip();
+        self.ws_effects.on_workspace_switch_start(
+            self.clock.clone(),
+            &self.options.layout.workspace_dip,
+            from_idx,
+            new_idx as f64,
+        );
 
         true
     }

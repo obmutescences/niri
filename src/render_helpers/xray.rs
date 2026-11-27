@@ -47,6 +47,12 @@ pub struct XrayPos {
 
     /// Zoom factor between backdrop coordinates and geometry.
     pub zoom: f64,
+
+    /// Optional Engine A 3D transform pivot (output-logical coords) applied around the workspace.
+    pub pivot_3d: Point<f64, Logical>,
+
+    /// Optional Engine A 3D anisotropic scale applied around `pivot_3d`.
+    pub scale_3d: Scale<f64>,
 }
 
 impl XrayPos {
@@ -54,12 +60,34 @@ impl XrayPos {
         Self {
             pos_in_backdrop: pos_in_backdrop.downscale(zoom),
             zoom,
+            pivot_3d: Point::new(0., 0.),
+            scale_3d: Scale::from(1.),
         }
     }
 
     pub fn offset(mut self, offset: Point<f64, Logical>) -> Self {
         self.pos_in_backdrop += offset;
         self
+    }
+
+    pub fn with_3d(mut self, pivot_3d: Point<f64, Logical>, scale_3d: Scale<f64>) -> Self {
+        self.pivot_3d = pivot_3d;
+        self.scale_3d = scale_3d;
+        self
+    }
+
+    fn map_backdrop_rect(&self, rect: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
+        let sx = self.scale_3d.x;
+        let sy = self.scale_3d.y;
+        if (sx - 1.).abs() < 1e-6 && (sy - 1.).abs() < 1e-6 {
+            return rect;
+        }
+        let px = self.pivot_3d.x;
+        let py = self.pivot_3d.y;
+        Rectangle::new(
+            Point::from((px + (rect.loc.x - px) * sx, py + (rect.loc.y - py) * sy)),
+            Size::from((rect.size.w * sx, rect.size.h * sy)),
+        )
     }
 }
 
@@ -68,6 +96,8 @@ impl Default for XrayPos {
         Self {
             pos_in_backdrop: Point::new(0., 0.),
             zoom: 1.,
+            pivot_3d: Point::new(0., 0.),
+            scale_3d: Scale::from(1.),
         }
     }
 }
@@ -132,10 +162,11 @@ impl Xray {
         let clip_pos_in_backdrop = pos_in_backdrop + clip_offset.upscale(zoom);
 
         let geo_in_backdrop = Rectangle::new(pos_in_backdrop, params.geometry.size.upscale(zoom));
+        let geo_in_backdrop_3d = xray_pos.map_backdrop_rect(geo_in_backdrop);
 
         let mut backdrop = self.backdrop[ctx.target as usize].borrow_mut();
         let backdrop_geo = Rectangle::from_size(backdrop.logical_size());
-        let intersection_with_backdrop = backdrop_geo.intersection(geo_in_backdrop);
+        let intersection_with_backdrop = backdrop_geo.intersection(geo_in_backdrop_3d);
 
         let mut skip_backdrop = intersection_with_backdrop.is_none();
 
@@ -220,10 +251,11 @@ impl Xray {
             }
 
             let buf_size = backdrop.logical_size();
-            let src = geo_in_backdrop.to_buffer(backdrop.scale(), Transform::Normal, &buf_size);
+            let src = geo_in_backdrop_3d.to_buffer(backdrop.scale(), Transform::Normal, &buf_size);
 
             let mut clip_geo_in_backdrop = Rectangle::new(clip_offset, clip_geo.size).upscale(zoom);
             clip_geo_in_backdrop.loc += geo_in_backdrop.loc;
+            let clip_geo_in_backdrop = xray_pos.map_backdrop_rect(clip_geo_in_backdrop);
 
             let clip_pos_in_backdrop = Vec2::new(
                 clip_geo_in_backdrop.loc.x as f32,
@@ -238,6 +270,7 @@ impl Xray {
             let input_to_clip_geo = Mat3::from_scale(buf_size / clip_geo_size)
                 * Mat3::from_translation(-clip_pos_in_backdrop / buf_size);
 
+            let eff_scale = ((xray_pos.scale_3d.x * xray_pos.scale_3d.y).sqrt() * zoom) as f32;
             let elem = XrayElement {
                 buffer: self.backdrop[ctx.target as usize].clone(),
                 id: backdrop.id().clone(),
@@ -246,7 +279,7 @@ impl Xray {
                 subregion: params.subregion.clone(),
                 input_to_clip_geo,
                 clip_geo_size,
-                corner_radius: corner_radius.scaled_by(zoom as f32),
+                corner_radius: corner_radius.scaled_by(eff_scale),
                 scale: params.scale as f32,
                 blur_options,
                 noise,

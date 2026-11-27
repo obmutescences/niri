@@ -1180,11 +1180,18 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.interactive_resize = None;
     }
 
-    pub fn refresh(&mut self, is_active: bool, is_focused: bool, layout_has_keyboard_focus: bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh(
+        &mut self,
+        is_active: bool,
+        is_focused: bool,
+        layout_has_keyboard_focus: bool,
+        is_solo_window: bool,
+        focus_dir: [f64; 2],
+        pointer_press_norm: Option<[f32; 2]>,
+        from_workspace_switch: bool,
+    ) {
         let active = self.active_window_id.clone();
-        let is_solo_window = self.options.layout.focus_animation.enabled
-            && self.options.layout.focus_animation.scale.enabled
-            && self.tiles.len() == 1;
 
         for tile in &mut self.tiles {
             let mut is_tile_active = is_active && Some(tile.window().id()) == active.as_ref();
@@ -1200,6 +1207,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
                 is_solo_window,
                 true,
                 layout_has_keyboard_focus,
+                focus_dir,
+                pointer_press_norm,
+                from_workspace_switch,
             );
 
             let win = tile.window_mut();

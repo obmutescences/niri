@@ -158,6 +158,7 @@ use crate::layout::tile::TileRenderElement;
 use crate::layout::workspace::{Workspace, WorkspaceId};
 use crate::layout::{
     HitType, Layout, LayoutElement as _, LayoutElementRenderElement, MonitorRenderElement,
+    RenderLayer,
 };
 use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
@@ -170,9 +171,11 @@ use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
+use crate::render_helpers::shader_element::ShaderRenderElement;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::surface::push_elements_from_surface_tree;
 use crate::render_helpers::texture::TextureBuffer;
+use crate::render_helpers::workspace_3d::WorkspaceCompositeElement;
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
     encompassing_geo, render_to_encompassing_texture, render_to_shm, render_to_texture,
@@ -4754,6 +4757,7 @@ impl Niri {
                     let pos = loc - geo.loc.to_f64();
                     Some(pos)
                 });
+                self.layout.set_pointer_pos(out, state.xray.pointer_pos);
 
                 state.xray.workspaces.clear();
                 let mon = self.layout.monitor_for_output(out).unwrap();
@@ -5097,10 +5101,10 @@ impl Niri {
 
             // Macro instead of closure to avoid borrowing push().
             macro_rules! process {
-                ($geo:expr, $depth:expr) => {{
+                ($geo:expr, $pivot:expr, $depth:expr) => {{
                     &mut |elem| {
                         if let Some(elem) =
-                            scale_relocate_crop(elem, output_scale, zoom, $geo, $depth)
+                            scale_relocate_crop(elem, output_scale, zoom, $geo, $pivot, $depth)
                         {
                             push(elem.into());
                         }
@@ -5108,40 +5112,273 @@ impl Niri {
                 }};
             }
 
-            for (ws, geo) in mon.workspaces_with_render_geo() {
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                let depth = mon.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, depth));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo, depth));
+            let mut rendered_3d_shader = false;
+            if mon.is_workspace_3d_shader_active() {
+                let cfg3d = mon.workspace_3d_config();
+                let poses = mon.workspace_3d_poses();
+                if !poses.is_empty() {
+                    let active_ids: Vec<u64> =
+                        poses.iter().map(|(_, ws, _)| ws.id().get()).collect();
+                    mon.ws_effects.ws3d_buffers.retain_ids(&active_ids);
+
+                    if cfg3d.exempt_moving_windows {
+                        mon.render_moving_windows_between_workspaces(
+                            ctx.r(),
+                            focus_ring,
+                            &mut |elem| push(elem.into()),
+                        );
+                    }
+
+                    let mut gles_ctx = ctx.as_gles();
+                    let mut all_ok = true;
+                    let mut shader_elems = Vec::with_capacity(poses.len());
+                    let viewport_px = Rectangle::from_size(mon.view_size())
+                        .to_physical_precise_round(output_scale);
+
+                    for (_ws_idx, ws, pose) in &poses {
+                        let ns = Some(ws.id().get() as usize);
+                        let mut ws_elems: Vec<WorkspaceCompositeElement<GlesRenderer>> = Vec::new();
+                        let ws_xray = XrayPos::default();
+
+                        macro_rules! push_ws_elem {
+                            ($elem:expr) => {{
+                                if let Some(cropped) = CropRenderElement::from_element(
+                                    $elem,
+                                    output_scale,
+                                    viewport_px,
+                                ) {
+                                    ws_elems.push(cropped.into());
+                                }
+                            }};
+                        }
+
+                        self.render_layer_popups(
+                            gles_ctx.r(),
+                            ns,
+                            &layer_map,
+                            Layer::Bottom,
+                            ws_xray,
+                            false,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+                        self.render_layer_popups(
+                            gles_ctx.r(),
+                            ns,
+                            &layer_map,
+                            Layer::Background,
+                            ws_xray,
+                            false,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+
+                        if !cfg3d.exempt_moving_windows {
+                            ws.render_floating(
+                                gles_ctx.r(),
+                                ws_xray,
+                                focus_ring,
+                                RenderLayer::MovingBetweenWorkspaces,
+                                &mut |elem| push_ws_elem!(elem),
+                            );
+                        }
+                        ws.render_floating(
+                            gles_ctx.r(),
+                            ws_xray,
+                            focus_ring,
+                            RenderLayer::Normal,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+
+                        if !cfg3d.exempt_moving_windows {
+                            ws.render_scrolling(
+                                gles_ctx.r(),
+                                ws_xray,
+                                focus_ring,
+                                RenderLayer::MovingBetweenWorkspaces,
+                                &mut |elem| push_ws_elem!(elem),
+                            );
+                        }
+                        ws.render_scrolling(
+                            gles_ctx.r(),
+                            ws_xray,
+                            focus_ring,
+                            RenderLayer::Normal,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+
+                        self.render_layer_normal(
+                            gles_ctx.r(),
+                            ns,
+                            &layer_map,
+                            Layer::Bottom,
+                            ws_xray,
+                            false,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+                        self.render_layer_normal(
+                            gles_ctx.r(),
+                            ns,
+                            &layer_map,
+                            Layer::Background,
+                            ws_xray,
+                            false,
+                            &mut |elem| push_ws_elem!(elem),
+                        );
+                        push_ws_elem!(ws.render_background());
+
+                        match mon.ws_effects.ws3d_buffers.render_workspace(
+                            gles_ctx.renderer,
+                            ws.id().get(),
+                            &ws_elems,
+                            mon.view_size(),
+                            output_scale,
+                            *pose,
+                        ) {
+                            Ok(Some((elem, ws_data))) => {
+                                // Propagate offscreen presentation data to all windows drawn
+                                // inside this 3D workspace so Wayland frame callbacks and input
+                                // redraws keep flowing seamlessly during the transition.
+                                for tile in ws.tiles() {
+                                    if cfg3d.exempt_moving_windows
+                                        && tile.is_moving_between_workspaces()
+                                    {
+                                        continue;
+                                    }
+                                    tile.window().set_offscreen_data(Some(
+                                        crate::render_helpers::offscreen::OffscreenData {
+                                            id: ws_data.id.clone(),
+                                            states: ws_data.states.clone(),
+                                        },
+                                    ));
+                                }
+                                shader_elems.push(elem);
+                            }
+                            Ok(None) => {
+                                all_ok = false;
+                                break;
+                            }
+                            Err(err) => {
+                                warn!("error rendering 3D workspace offscreen: {err:?}");
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_ok {
+                        for elem in shader_elems {
+                            push(OutputRenderElements::Workspace3D(elem));
+                        }
+                        rendered_3d_shader = true;
+                    }
+                }
             }
 
-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+            if !rendered_3d_shader {
+                let cfg3d = mon.workspace_3d_config();
+                let bg_parallax = 1.0 + cfg3d.parallax * 0.45;
 
-            for (ws, geo) in mon.workspaces_with_render_geo() {
-                // The render element namespace. This will be set to the workspace index for
-                // elements duplicated across workspaces (i.e. background and bottom layers) in
-                // order to have their non-xray framebuffer effects separated from each other.
-                //
-                // This doesn't have to correspond exactly to workspace id or idx, the only
-                // requirement is that there's only one framebuffer effect element with a given id +
-                // namespace on the frame at once. Id + namespace is used as the cache key in the
-                // damage tracker.
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                let depth = mon.workspace_3d_scale(geo).unwrap_or(Scale::from(1.));
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, depth));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, depth));
+                for (ws, geo) in mon.workspaces_with_render_geo() {
+                    let ns = Some(ws.id().get() as usize);
+                    let default_center = geo.loc + geo.size.to_point().downscale(2.);
+                    let (pivot, depth) = mon
+                        .workspace_3d_engine_a(geo, bg_parallax)
+                        .map_or((default_center, Scale::from(1.)), |tf| (tf.pivot, tf.scale));
+                    let xray_pos = XrayPos::new(geo.loc, zoom).with_3d(pivot, depth);
+                    push_popups_from_layer!(
+                        Layer::Bottom,
+                        ns,
+                        xray_pos,
+                        process!(geo, pivot, depth)
+                    );
+                    push_popups_from_layer!(
+                        Layer::Background,
+                        ns,
+                        xray_pos,
+                        process!(geo, pivot, depth)
+                    );
+                }
 
-                process!(geo, depth)(ws.render_background());
+                mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
+
+                for (ws, geo) in mon.workspaces_with_render_geo() {
+                    let ns = Some(ws.id().get() as usize);
+                    let default_center = geo.loc + geo.size.to_point().downscale(2.);
+                    let (pivot, depth) = mon
+                        .workspace_3d_engine_a(geo, bg_parallax)
+                        .map_or((default_center, Scale::from(1.)), |tf| (tf.pivot, tf.scale));
+                    let xray_pos = XrayPos::new(geo.loc, zoom).with_3d(pivot, depth);
+                    push_normal_from_layer!(
+                        Layer::Bottom,
+                        ns,
+                        xray_pos,
+                        process!(geo, pivot, depth)
+                    );
+                    push_normal_from_layer!(
+                        Layer::Background,
+                        ns,
+                        xray_pos,
+                        process!(geo, pivot, depth)
+                    );
+
+                    process!(geo, pivot, depth)(ws.render_background());
+                }
             }
         }
 
         mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
 
+        // Subtle backdrop dimming & counter-zoom parallax while workspace-dip is active.
+        let (backdrop_dim, backdrop_parallax) = mon.dip_backdrop_effects();
+        if backdrop_dim > 0.002 {
+            let dim_buf = SolidColorBuffer::new(mon.view_size(), [0., 0., 0., backdrop_dim]);
+            push(
+                SolidColorRenderElement::from_buffer(
+                    &dim_buf,
+                    Point::from((0., 0.)),
+                    1.,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
+        }
+
         // Then the backdrop.
-        push_popups_from_layer!(Layer::Background, true);
-        push_normal_from_layer!(Layer::Background, true);
+        if (backdrop_parallax - 1.0).abs() > 1e-4 {
+            let center_px = mon
+                .view_size()
+                .to_point()
+                .downscale(2.)
+                .to_physical_precise_round(output_scale);
+            self.render_layer_popups(
+                ctx.r(),
+                None,
+                &layer_map,
+                Layer::Background,
+                XrayPos::default(),
+                true,
+                &mut |elem| {
+                    push(OutputRenderElements::RescaledLayerSurface(
+                        RescaleRenderElement::from_element(elem, center_px, backdrop_parallax),
+                    ));
+                },
+            );
+            self.render_layer_normal(
+                ctx.r(),
+                None,
+                &layer_map,
+                Layer::Background,
+                XrayPos::default(),
+                true,
+                &mut |elem| {
+                    push(OutputRenderElements::RescaledLayerSurface(
+                        RescaleRenderElement::from_element(elem, center_px, backdrop_parallax),
+                    ));
+                },
+            );
+        } else {
+            push_popups_from_layer!(Layer::Background, true);
+            push_normal_from_layer!(Layer::Background, true);
+        }
 
         push(backdrop);
     }
@@ -7904,6 +8141,7 @@ fn scale_relocate_crop<E: Element>(
     output_scale: Scale<f64>,
     zoom: f64,
     ws_geo: Rectangle<f64, Logical>,
+    pivot: Point<f64, Logical>,
     depth: Scale<f64>,
 ) -> Option<CropRenderElement<RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<E>>>>>
 {
@@ -7911,13 +8149,10 @@ fn scale_relocate_crop<E: Element>(
     let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
     let elem = RelocateRenderElement::from_element(elem, ws_geo.loc, Relocate::Relative);
 
-    // N6: recede the whole workspace about its own center, matching the depth transform
-    // applied to windows in `Monitor::render_workspaces`.
-    let center = Point::from((
-        ws_geo.loc.x + ws_geo.size.w / 2,
-        ws_geo.loc.y + ws_geo.size.h / 2,
-    ));
-    let elem = RescaleRenderElement::from_element(elem, center, depth);
+    // Engine A: recede the whole workspace about its configured pivot (hinge or center),
+    // matching the depth transform applied to windows in `Monitor::render_workspaces`.
+    let pivot_px = pivot.to_physical_precise_round(output_scale);
+    let elem = RescaleRenderElement::from_element(elem, pivot_px, depth);
 
     CropRenderElement::from_element(elem, output_scale, ws_geo)
 }
@@ -7946,8 +8181,10 @@ niri_render_elements! {
 niri_render_elements! {
     OutputRenderElements<R> => {
         Monitor = MonitorRenderElement<R>,
+        Workspace3D = ShaderRenderElement,
         RescaledTile = RescaleRenderElement<TileRenderElement<R>>,
         LayerSurface = LayerSurfaceRenderElement<R>,
+        RescaledLayerSurface = RescaleRenderElement<LayerSurfaceRenderElement<R>>,
         RelocatedLayerSurface = CropRenderElement<RescaleRenderElement<RelocateRenderElement<RescaleRenderElement<
             LayerSurfaceRenderElement<R>
         >>>>,

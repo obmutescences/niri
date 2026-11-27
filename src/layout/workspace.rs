@@ -112,6 +112,10 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
+
+    /// Last focused window ID and center in workspace coordinates (for directional focus
+    /// nudge/tilt).
+    last_focused_tile: Option<(W::Id, Point<f64, Logical>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +280,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
+            last_focused_tile: None,
         }
     }
 
@@ -338,6 +343,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             id: WorkspaceId::next(),
+            last_focused_tile: None,
         }
     }
 
@@ -1859,16 +1865,74 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
-    pub fn refresh(&mut self, is_active: bool, is_focused: bool, layout_has_keyboard_focus: bool) {
+    pub fn refresh(
+        &mut self,
+        is_active: bool,
+        is_focused: bool,
+        layout_has_keyboard_focus: bool,
+        pointer_in_ws: Option<Point<f64, Logical>>,
+        from_workspace_switch: bool,
+    ) {
+        let is_solo_window = self.scrolling.tiles().count() + self.floating.tiles().count() <= 1;
+
+        let mut focus_dir = [0., 0.];
+        let mut pointer_press_norm = None;
+
+        if is_active && is_focused && layout_has_keyboard_focus {
+            let active_id = self.active_window().map(|w| w.id().clone());
+            if let Some(active_id) = active_id {
+                let active_rect = self
+                    .tiles_with_render_positions()
+                    .find(|(tile, _, _)| tile.window().id() == &active_id)
+                    .map(|(tile, pos, _)| Rectangle::new(pos, tile.animated_tile_size()));
+
+                if let Some(rect) = active_rect {
+                    let center = Point::from((
+                        rect.loc.x + rect.size.w * 0.5,
+                        rect.loc.y + rect.size.h * 0.5,
+                    ));
+
+                    if let Some((prev_id, prev_center)) = &self.last_focused_tile {
+                        if prev_id != &active_id {
+                            let dx = center.x - prev_center.x;
+                            let dy = center.y - prev_center.y;
+                            let len = dx.hypot(dy);
+                            if len > 1.0 {
+                                focus_dir = [dx / len, dy / len];
+                            }
+                        }
+                    }
+
+                    if let Some(ptr) = pointer_in_ws {
+                        if rect.contains(ptr) && rect.size.w > 1.0 && rect.size.h > 1.0 {
+                            let nx = ((ptr.x - center.x) / (rect.size.w * 0.5)).clamp(-1.0, 1.0);
+                            let ny = ((ptr.y - center.y) / (rect.size.h * 0.5)).clamp(-1.0, 1.0);
+                            pointer_press_norm = Some([nx as f32, ny as f32]);
+                        }
+                    }
+
+                    self.last_focused_tile = Some((active_id, center));
+                }
+            }
+        }
+
         self.scrolling.refresh(
             is_active && !self.floating_is_active.get(),
             is_focused,
             layout_has_keyboard_focus,
+            is_solo_window,
+            focus_dir,
+            pointer_press_norm,
+            from_workspace_switch,
         );
         self.floating.refresh(
             is_active && self.floating_is_active.get(),
             is_focused,
             layout_has_keyboard_focus,
+            is_solo_window,
+            focus_dir,
+            pointer_press_norm,
+            from_workspace_switch,
         );
     }
 

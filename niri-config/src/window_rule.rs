@@ -5,6 +5,7 @@ use crate::appearance::{
     BackgroundEffect, BackgroundEffectRule, BlockOutFrom, BorderRule, CornerRadius, ShadowRule,
     TabIndicatorRule,
 };
+use crate::focus_animation::FocusAnimationPart;
 use crate::layout::DefaultPresetSize;
 use crate::utils::{MergeWith, RegexEq};
 use crate::FloatOrInt;
@@ -84,6 +85,8 @@ pub struct WindowRule {
     pub background_effect: BackgroundEffectRule,
     #[knuffel(child, default)]
     pub popups: PopupsRule,
+    #[knuffel(child)]
+    pub focus_animation: Option<FocusAnimationPart>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -77,6 +77,7 @@ use crate::window::ResolvedWindowRules;
 
 pub mod closing_window;
 pub mod floating;
+pub mod focus_effect;
 pub mod focus_ring;
 pub mod insert_hint_element;
 pub mod monitor;
@@ -86,6 +87,7 @@ pub mod shadow;
 pub mod tab_indicator;
 pub mod tile;
 pub mod workspace;
+pub mod workspace_effects;
 
 #[cfg(test)]
 mod tests;
@@ -5007,6 +5009,14 @@ impl<W: LayoutElement> Layout<W> {
             });
     }
 
+    pub fn set_pointer_pos(&mut self, output: &Output, pos: Option<Point<f64, Logical>>) {
+        if let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set {
+            if let Some(mon) = monitors.iter_mut().find(|m| m.output() == output) {
+                mon.set_pointer_pos(pos);
+            }
+        }
+    }
+
     pub fn refresh(&mut self, is_active: bool, layout_has_keyboard_focus: bool) {
         let _span = tracy_client::span!("Layout::refresh");
 
@@ -5059,9 +5069,18 @@ impl<W: LayoutElement> Layout<W> {
                         mon.dnd_scroll_gesture_end();
                     }
 
+                    let from_ws_switch = mon.workspace_switch.is_some();
+                    let pointer_in_output = mon.last_pointer_pos();
                     for (ws_idx, ws) in mon.workspaces.iter_mut().enumerate() {
                         let is_focused = is_active && ws_idx == mon.active_workspace_idx;
-                        ws.refresh(is_active, is_focused, layout_has_keyboard_focus);
+                        let ptr = is_focused.then_some(pointer_in_output).flatten();
+                        ws.refresh(
+                            is_active,
+                            is_focused,
+                            layout_has_keyboard_focus,
+                            ptr,
+                            from_ws_switch,
+                        );
 
                         if let Some(is_scrolling) = ongoing_scrolling_dnd {
                             // Lock or unlock the view for scrolling interactive move.
@@ -5081,7 +5100,7 @@ impl<W: LayoutElement> Layout<W> {
             }
             MonitorSet::NoOutputs { workspaces, .. } => {
                 for ws in workspaces {
-                    ws.refresh(false, false, layout_has_keyboard_focus);
+                    ws.refresh(false, false, layout_has_keyboard_focus, None, false);
                     ws.view_offset_gesture_end(None);
                 }
             }

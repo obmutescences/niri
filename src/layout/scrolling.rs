@@ -3719,12 +3719,17 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         self.interactive_resize = None;
     }
 
-    pub fn refresh(&mut self, is_active: bool, is_focused: bool, layout_has_keyboard_focus: bool) {
-        let is_solo_window = self.options.layout.focus_animation.enabled
-            && self.options.layout.focus_animation.scale.enabled
-            && self.columns.len() == 1
-            && self.columns.first().is_some_and(|c| c.tiles.len() == 1);
-
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh(
+        &mut self,
+        is_active: bool,
+        is_focused: bool,
+        layout_has_keyboard_focus: bool,
+        is_solo_window: bool,
+        focus_dir: [f64; 2],
+        pointer_press_norm: Option<[f32; 2]>,
+        from_workspace_switch: bool,
+    ) {
         for (col_idx, col) in self.columns.iter_mut().enumerate() {
             let mut col_resize_data = None;
             if let Some(resize) = &self.interactive_resize {
@@ -3781,6 +3786,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     is_solo_window,
                     false,
                     layout_has_keyboard_focus,
+                    focus_dir,
+                    pointer_press_norm,
+                    from_workspace_switch,
                 );
 
                 let win = tile.window_mut();

@@ -411,13 +411,16 @@ void main() {
             rgb = mix(rgb, lg_rim_color.rgb, cur_mix);
         }
 
-        // One-shot diagonal glass shimmer sweep on focus gain.
-        if (lg_focus_shimmer > 0.0001 && lg_focus_progress > 0.001 && lg_focus_progress < 0.999) {
-            float diag = uv_geo.x * 0.65 + uv_geo.y * 0.35;
-            float sweep_pos = lg_focus_progress * 1.6 - 0.3;
+        // One-shot directional diagonal glass shimmer sweep on focus gain.
+        // Positive `lg_focus_progress` sweeps left-to-right; negative sweeps right-to-left.
+        float fp = abs(lg_focus_progress);
+        if (lg_focus_shimmer > 0.0001 && fp > 0.001 && fp < 0.999) {
+            float sx = lg_focus_progress >= 0.0 ? uv_geo.x : (1.0 - uv_geo.x);
+            float diag = sx * 0.65 + uv_geo.y * 0.35;
+            float sweep_pos = fp * 1.6 - 0.3;
             float d_sweep = (diag - sweep_pos) * 7.5;
             float band = exp(-(d_sweep * d_sweep));
-            float env = sin(lg_focus_progress * 3.14159265);
+            float env = sin(fp * 3.14159265);
             float shimmer = clamp(band * env * lg_focus_shimmer * 0.28, 0.0, 0.55);
             rgb = mix(rgb, lg_sheen_color.rgb, shimmer);
         }

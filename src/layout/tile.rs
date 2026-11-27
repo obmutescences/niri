@@ -11,6 +11,7 @@ use smithay::backend::renderer::element::{Element, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
+use super::focus_effect::{FocusEffectState, FocusTriggerContext};
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::opening_window::{OpenAnimation, OpeningWindowRenderElement};
 use super::shadow::Shadow;
@@ -28,9 +29,13 @@ use crate::render_helpers::damage::ExtraDamage;
 use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenRenderElement};
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::resize::ResizeRenderElement;
+use crate::render_helpers::shader_element::ShaderRenderElement;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+use crate::render_helpers::tile_focus::{
+    build_focus_glow_element, render_tile_focus_shader, FocusGlowElement, TileFocusShaderParams,
+};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{RenderCtx, RenderTarget};
 use crate::utils::transaction::Transaction;
@@ -99,17 +104,12 @@ pub struct Tile<W: LayoutElement> {
     /// The animation of the tile's opacity.
     pub(super) alpha_animation: Option<AlphaAnimation>,
 
-    /// The animation of the tile's scale.
-    pub(super) scale_animation: Option<ScaleAnimation>,
+    /// Self-contained focus animation, directional nudge, 3D tilt, glow, shimmer, and opacity
+    /// transition state.
+    focus_effect: FocusEffectState,
 
-    /// Whether the window was focused during the last render update.
-    pub(super) was_focused: bool,
-
-    /// State machine for focus animations.
-    focus_animation_state: FocusAnimationState,
-
-    /// One-shot diagonal glass shimmer animation triggered on focus gain.
-    glass_shimmer_animation: Option<Animation>,
+    /// Offscreen buffer used on demand when focus scale/jelly/tilt shader transform is active.
+    focus_offscreen: OffscreenBuffer,
 
     /// Offset during the initial interactive move rubberband.
     pub(super) interactive_move_offset: Point<f64, Logical>,
@@ -147,6 +147,7 @@ niri_render_elements! {
         ClippedSurface = ClippedSurfaceRenderElement<R>,
         Offscreen = OffscreenRenderElement,
         Scale = RelocateRenderElement<RescaleRenderElement<OffscreenRenderElement>>,
+        TileFocus = ShaderRenderElement,
         ExtraDamage = ExtraDamage,
         BackgroundEffect = BackgroundEffectElement,
     }
@@ -194,27 +195,6 @@ pub(super) struct AlphaAnimation {
     offscreen: OffscreenBuffer,
 }
 
-#[derive(Debug)]
-pub(super) struct ScaleAnimation {
-    pub(super) anim: Animation,
-    offscreen: OffscreenBuffer,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-enum FocusAnimationState {
-    #[default]
-    Idle,
-    Flashing {
-        phase: FlashPhase,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum FlashPhase {
-    Shrinking,
-    Expanding,
-}
-
 impl<W: LayoutElement> Tile<W> {
     pub fn new(
         window: W,
@@ -247,10 +227,8 @@ impl<W: LayoutElement> Tile<W> {
             move_x_animation: None,
             move_y_animation: None,
             alpha_animation: None,
-            scale_animation: None,
-            was_focused: false,
-            focus_animation_state: FocusAnimationState::Idle,
-            glass_shimmer_animation: None,
+            focus_effect: FocusEffectState::new(clock.clone()),
+            focus_offscreen: OffscreenBuffer::default(),
             interactive_move_offset: Point::from((0., 0.)),
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
@@ -489,17 +467,13 @@ impl<W: LayoutElement> Tile<W> {
             }
         }
 
-        if let Some(shimmer) = &self.glass_shimmer_animation {
-            if shimmer.is_done() {
-                self.glass_shimmer_animation = None;
-            }
-        }
-
-        self.advance_focus_animation();
+        self.focus_effect.advance();
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.are_transitions_ongoing() || self.window.rules().baba_is_float == Some(true)
+        self.are_transitions_ongoing()
+            || self.focus_effect.is_animating()
+            || self.window.rules().baba_is_float == Some(true)
     }
 
     pub fn are_transitions_ongoing(&self) -> bool {
@@ -511,12 +485,6 @@ impl<W: LayoutElement> Tile<W> {
                 .alpha_animation
                 .as_ref()
                 .is_some_and(|alpha| !alpha.anim.is_done())
-            || self
-                .scale_animation
-                .as_ref()
-                .is_some_and(|scale| !scale.anim.is_done())
-            || !matches!(self.focus_animation_state, FocusAnimationState::Idle)
-            || self.glass_shimmer_animation.is_some()
     }
 
     pub fn is_moving_between_workspaces(&self) -> bool {
@@ -745,73 +713,6 @@ impl<W: LayoutElement> Tile<W> {
         });
     }
 
-    pub fn animate_scale(&mut self, from: f64, to: f64, config: niri_config::Animation) {
-        let (current, offscreen) = if let Some(scale) = self.scale_animation.take() {
-            (scale.anim.value(), scale.offscreen)
-        } else {
-            (from, OffscreenBuffer::default())
-        };
-
-        self.scale_animation = Some(ScaleAnimation {
-            anim: Animation::new(self.clock.clone(), current, to, 0., config),
-            offscreen,
-        });
-    }
-
-    fn focus_animation_expand_config(
-        focus_config: &niri_config::FocusAnimation,
-    ) -> niri_config::Animation {
-        match focus_config.anim.kind {
-            niri_config::animations::Kind::Easing(p) => {
-                let duration = p.duration_ms.saturating_sub(p.duration_ms.div_ceil(2));
-                niri_config::Animation {
-                    off: false,
-                    kind: niri_config::animations::Kind::Easing(
-                        niri_config::animations::EasingParams {
-                            duration_ms: duration.max(1),
-                            curve: p.curve,
-                        },
-                    ),
-                }
-            }
-            niri_config::animations::Kind::Spring(p) => niri_config::Animation {
-                off: false,
-                kind: niri_config::animations::Kind::Spring(p),
-            },
-        }
-    }
-
-    fn advance_focus_animation(&mut self) {
-        let current = match &self.scale_animation {
-            Some(scale) if scale.anim.is_done() => scale.anim.value(),
-            Some(_) => return,
-            None => {
-                self.focus_animation_state = FocusAnimationState::Idle;
-                return;
-            }
-        };
-
-        match self.focus_animation_state {
-            FocusAnimationState::Flashing {
-                phase: FlashPhase::Shrinking,
-            } => {
-                let config =
-                    Self::focus_animation_expand_config(&self.options.layout.focus_animation);
-                self.focus_animation_state = FocusAnimationState::Flashing {
-                    phase: FlashPhase::Expanding,
-                };
-                self.animate_scale(current, 1.0, config);
-            }
-            FocusAnimationState::Flashing {
-                phase: FlashPhase::Expanding,
-            }
-            | FocusAnimationState::Idle => {
-                self.scale_animation = None;
-                self.focus_animation_state = FocusAnimationState::Idle;
-            }
-        }
-    }
-
     pub fn update_focus_animation(
         &mut self,
         layout_config: &niri_config::Layout,
@@ -819,102 +720,49 @@ impl<W: LayoutElement> Tile<W> {
         is_solo_window: bool,
         is_floating: bool,
         layout_has_keyboard_focus: bool,
+        direction: [f64; 2],
+        pointer_press_norm: Option<[f32; 2]>,
+        from_workspace_switch: bool,
     ) {
-        // When the keyboard focus is on a layer surface, popup, or other non-window UI, an
-        // `is_focused=false` for this tile does not mean that the window itself lost focus. Keep
-        // `was_focused` frozen so closing that UI does not re-trigger the flash on the same window.
-        // Still advance an already-running animation, otherwise it could get stuck mid-flash.
-        if !layout_has_keyboard_focus {
-            if let Some(shimmer) = &self.glass_shimmer_animation {
-                if shimmer.is_done() {
-                    self.glass_shimmer_animation = None;
-                }
-            }
-            if matches!(
-                self.focus_animation_state,
-                FocusAnimationState::Flashing { .. }
-            ) {
-                self.advance_focus_animation();
-            }
-            return;
-        }
+        let rules = self.window.rules();
+        let resolved = FocusEffectState::resolved_config(
+            &layout_config.focus_animation,
+            rules.focus_animation.as_ref(),
+        );
 
-        // Trigger one-shot liquid glass focus shimmer on focus gain when configured.
-        if is_focused
-            && !self.was_focused
-            && self
-                .window
-                .rules()
-                .background_effect
-                .liquid_glass
-                .is_some_and(|lg| lg.focus_shimmer > 0.0)
-        {
-            self.glass_shimmer_animation = Some(Animation::ease(
-                self.clock.clone(),
-                0.,
-                1.,
-                0.,
-                280,
-                crate::animation::Curve::EaseOutCubic,
-            ));
-        }
+        // Smoothly interpolate window-rule opacity transitions (e.g. inactive dim/opacity).
+        let target_opacity = if self.window.is_ignoring_opacity_window_rule() {
+            1.
+        } else {
+            rules.opacity.unwrap_or(1.).clamp(0., 1.)
+        };
+        self.focus_effect
+            .update_opacity_transition(target_opacity, resolved.opacity_transition_ms);
 
-        let focus_config = &layout_config.focus_animation;
-        let scale_config = &focus_config.scale;
+        let has_liquid_glass_shimmer = rules
+            .background_effect
+            .liquid_glass
+            .is_some_and(|lg| lg.focus_shimmer > 0.0);
 
-        if is_floating && scale_config.disable_on_floating {
-            self.scale_animation = None;
-            self.focus_animation_state = FocusAnimationState::Idle;
-            self.was_focused = is_focused;
-            return;
-        }
+        let ctx = FocusTriggerContext {
+            is_focused,
+            is_solo_window,
+            is_floating,
+            is_fullscreen: self.sizing_mode.is_fullscreen(),
+            is_maximized: self.sizing_mode.is_maximized(),
+            is_opening: self.open_animation.is_some(),
+            layout_has_keyboard_focus,
+            direction,
+            pointer_press_norm,
+            from_workspace_switch,
+        };
 
-        // Check for Focus Animation Trigger
-        let animation_enabled = focus_config.enabled
-            && scale_config.enabled
-            && !(is_solo_window && scale_config.disable_on_solo);
-
-        if is_focused && !self.was_focused && animation_enabled {
-            let target_scale = scale_config.flash_scale.clamp(0.0, 2.0) as f64;
-
-            let shrink_config = match focus_config.anim.kind {
-                niri_config::animations::Kind::Easing(p) => {
-                    let duration = p.duration_ms.div_ceil(2);
-                    niri_config::Animation {
-                        off: false,
-                        kind: niri_config::animations::Kind::Easing(
-                            niri_config::animations::EasingParams {
-                                duration_ms: duration.max(1),
-                                curve: p.curve,
-                            },
-                        ),
-                    }
-                }
-                niri_config::animations::Kind::Spring(_) => niri_config::Animation {
-                    off: false,
-                    kind: niri_config::animations::Kind::Easing(
-                        niri_config::animations::EasingParams {
-                            duration_ms: 50,
-                            curve: niri_config::animations::Curve::EaseOutQuad,
-                        },
-                    ),
-                },
-            };
-
-            self.focus_animation_state = FocusAnimationState::Flashing {
-                phase: FlashPhase::Shrinking,
-            };
-            self.animate_scale(1.0, target_scale, shrink_config);
-            self.was_focused = true;
-            return;
-        }
-        self.was_focused = is_focused;
-
-        // Handle Existing Animation State
-        match self.focus_animation_state {
-            FocusAnimationState::Flashing { .. } => self.advance_focus_animation(),
-            FocusAnimationState::Idle => (),
-        }
+        self.focus_effect.update(
+            &layout_config.focus_animation,
+            rules.focus_animation.as_ref(),
+            ctx,
+            has_liquid_glass_shimmer,
+        );
     }
 
     pub fn ensure_alpha_animates_to_1(&mut self) {
@@ -1292,6 +1140,7 @@ impl<W: LayoutElement> Tile<W> {
         Point::from((0., y))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inner<R: NiriRenderer>(
         &self,
         mut ctx: RenderCtx<R>,
@@ -1299,6 +1148,9 @@ impl<W: LayoutElement> Tile<W> {
         mut xray_pos: XrayPos,
         focus_ring: bool,
         force_background_xray: bool,
+        include_popups: bool,
+        focus_shimmer_progress: f32,
+        focus_pulse_progress: Option<f32>,
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render_inner");
@@ -1311,6 +1163,7 @@ impl<W: LayoutElement> Tile<W> {
             1.
         } else {
             let alpha = self.window.rules().opacity.unwrap_or(1.).clamp(0., 1.);
+            let alpha = self.focus_effect.effective_opacity(alpha);
 
             // Interpolate towards alpha = 1. at fullscreen.
             let p = fullscreen_progress as f32;
@@ -1347,14 +1200,16 @@ impl<W: LayoutElement> Tile<W> {
             .scaled_by(1. - expanded_progress as f32);
 
         // Popups go on top, whether it's resize or not.
-        self.window.render_popups(
-            ctx.r(),
-            window_render_loc,
-            scale,
-            win_alpha,
-            xray_pos,
-            &mut |elem| push(elem.into()),
-        );
+        if include_popups {
+            self.window.render_popups(
+                ctx.r(),
+                window_render_loc,
+                scale,
+                win_alpha,
+                xray_pos,
+                &mut |elem| push(elem.into()),
+            );
+        }
 
         // If we're resizing, try to render a shader, or a fallback.
         let mut pushed_resize = false;
@@ -1571,13 +1426,22 @@ impl<W: LayoutElement> Tile<W> {
         if expanded_progress < 1. {
             self.shadow
                 .render(ctx.renderer, location, &mut |elem| push(elem.into()));
+
+            if let Some(p) = focus_pulse_progress {
+                if let Some(FocusGlowElement::Pulse(elem)) = build_focus_glow_element(
+                    self.focus_effect.active_glow(),
+                    p,
+                    location,
+                    self.animated_tile_size(),
+                    radius,
+                    self.scale as f32,
+                ) {
+                    push(elem.into());
+                }
+            }
         }
 
         let surface_anim_scale = animated_window_size / window_size;
-        let focus_shimmer_progress = self
-            .glass_shimmer_animation
-            .as_ref()
-            .map_or(0.0, |a| a.clamped_value() as f32);
         self.window.render_background_effect(
             ctx.as_gles(),
             area,
@@ -1613,6 +1477,20 @@ impl<W: LayoutElement> Tile<W> {
             .as_ref()
             .map_or(1., |alpha| alpha.anim.clamped_value()) as f32;
 
+        let tile_size = self.animated_tile_size();
+        let tf = self.focus_effect.sample(tile_size);
+        let focus_offset = tf.nudge + Point::from((0., tf.lift_y));
+        let eff_loc = location + focus_offset;
+        let eff_xray = xray_pos.offset(focus_offset);
+
+        let active_glow = self.focus_effect.active_glow();
+        let pulse_progress = tf
+            .glow_progress
+            .filter(|_| active_glow.style == niri_config::FocusGlowStyle::Pulse);
+        let ripple_progress = tf
+            .glow_progress
+            .filter(|_| active_glow.style == niri_config::FocusGlowStyle::Ripple);
+
         let mut pushed = false;
         self.window().set_offscreen_data(None);
 
@@ -1625,12 +1503,15 @@ impl<W: LayoutElement> Tile<W> {
                 xray_pos,
                 focus_ring,
                 false,
+                true,
+                tf.shimmer_progress,
+                None,
                 &mut |elem| elements.push(elem),
             );
             match open.render(
                 ctx.renderer,
                 &elements,
-                self.animated_tile_size(),
+                tile_size,
                 location,
                 scale,
                 tile_alpha,
@@ -1653,6 +1534,9 @@ impl<W: LayoutElement> Tile<W> {
                 xray_pos,
                 focus_ring,
                 false,
+                true,
+                tf.shimmer_progress,
+                None,
                 &mut |elem| elements.push(elem),
             );
             match alpha.offscreen.render(ctx.renderer, scale, &elements) {
@@ -1668,48 +1552,133 @@ impl<W: LayoutElement> Tile<W> {
                     warn!("error rendering tile to offscreen for alpha animation: {err:?}");
                 }
             }
-        } else if let Some(scale_anim) = &self.scale_animation {
+        } else if tf.needs_offscreen {
+            // Render popups sharply above the transformed tile so menus/IME are never squashed.
+            let bob_offset = self.bob_offset();
+            let popup_loc = eff_loc + bob_offset + self.window_loc();
+            let popup_xray = eff_xray.offset(bob_offset + self.window_loc());
+            let popup_alpha = if self.window.is_ignoring_opacity_window_rule() {
+                1.
+            } else {
+                self.focus_effect
+                    .effective_opacity(self.window.rules().opacity.unwrap_or(1.).clamp(0., 1.))
+            };
+            self.window.render_popups(
+                ctx.r(),
+                popup_loc,
+                scale,
+                popup_alpha,
+                popup_xray,
+                &mut |elem| push(elem.into()),
+            );
+
+            // Render expanding ripple ring cleanly above the tile border without clipping.
+            if let Some(p) = ripple_progress {
+                let radius = self
+                    .window
+                    .geometry_corner_radius()
+                    .scaled_by(1. - self.expanded_progress() as f32);
+                if let Some(FocusGlowElement::Ripple(elem)) = build_focus_glow_element(
+                    active_glow,
+                    p,
+                    eff_loc + bob_offset,
+                    tile_size,
+                    radius,
+                    self.scale as f32,
+                ) {
+                    push(elem.into());
+                }
+            }
+
             let mut ctx = ctx.as_gles();
             let mut elements = Vec::new();
             self.render_inner(
                 ctx.r(),
                 Point::new(0., 0.),
-                xray_pos,
+                eff_xray,
                 focus_ring,
                 true,
+                false,
+                tf.shimmer_progress,
+                pulse_progress,
                 &mut |elem| elements.push(elem),
             );
-            match scale_anim.offscreen.render(ctx.renderer, scale, &elements) {
-                Ok((elem, _sync, data)) => {
-                    let progress = scale_anim.anim.value();
-                    let center = self.animated_tile_size().to_point().downscale(2.);
-
-                    let elem = RescaleRenderElement::from_element(
-                        elem,
-                        center.to_physical_precise_round(scale),
-                        progress,
+            match self.focus_offscreen.render(ctx.renderer, scale, &elements) {
+                Ok((elem, _sync, mut data)) => {
+                    let shader_elem = render_tile_focus_shader(
+                        ctx.renderer,
+                        &elem,
+                        TileFocusShaderParams {
+                            tile_size,
+                            location: eff_loc,
+                            scale,
+                            scale_xy: tf.scale_xy,
+                            tilt: tf.tilt,
+                            brightness_pulse: tf.brightness_pulse,
+                            alpha: 1.0,
+                        },
                     );
-
-                    let elem = RelocateRenderElement::from_element(
-                        elem,
-                        location.to_physical_precise_round(scale),
-                        Relocate::Relative,
-                    );
-
-                    self.window().set_offscreen_data(Some(data));
-                    push(elem.into());
-                    pushed = true;
+                    if let Some(shader_elem) = shader_elem {
+                        data.id = shader_elem.id().clone();
+                        self.window().set_offscreen_data(Some(data));
+                        push(shader_elem.into());
+                        pushed = true;
+                    } else {
+                        // Graceful 2D fallback if `tile_focus` shader is unavailable.
+                        let center = tile_size.to_point().downscale(2.);
+                        let uni_scale =
+                            f64::from(tf.scale_xy[0]).midpoint(f64::from(tf.scale_xy[1]));
+                        let elem = RescaleRenderElement::from_element(
+                            elem,
+                            center.to_physical_precise_round(scale),
+                            uni_scale,
+                        );
+                        let elem = RelocateRenderElement::from_element(
+                            elem,
+                            eff_loc.to_physical_precise_round(scale),
+                            Relocate::Relative,
+                        );
+                        self.window().set_offscreen_data(Some(data));
+                        push(elem.into());
+                        pushed = true;
+                    }
                 }
                 Err(err) => {
-                    warn!("error rendering tile to offscreen for scale animation: {err:?}");
+                    warn!("error rendering tile to offscreen for focus animation: {err:?}");
                 }
             }
         }
 
         if !pushed {
-            self.render_inner(ctx, location, xray_pos, focus_ring, false, &mut |elem| {
-                push(elem)
-            });
+            // Zero-FBO fast path: directional nudge, elevation lift, glow/ripple, smooth opacity,
+            // and glass shimmer all run with zero offscreen allocations!
+            if let Some(p) = ripple_progress {
+                let radius = self
+                    .window
+                    .geometry_corner_radius()
+                    .scaled_by(1. - self.expanded_progress() as f32);
+                if let Some(FocusGlowElement::Ripple(elem)) = build_focus_glow_element(
+                    active_glow,
+                    p,
+                    eff_loc + self.bob_offset(),
+                    tile_size,
+                    radius,
+                    self.scale as f32,
+                ) {
+                    push(elem.into());
+                }
+            }
+            self.render_inner(
+                ctx,
+                eff_loc,
+                eff_xray,
+                focus_ring,
+                false,
+                true,
+                tf.shimmer_progress,
+                pulse_progress,
+                &mut |elem| push(elem),
+            );
         }
     }
 

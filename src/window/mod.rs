@@ -3,8 +3,8 @@ use std::cmp::{max, min};
 use niri_config::utils::MergeWith as _;
 use niri_config::window_rule::{Match, OnXdgActivate, VrrRule, WindowRule};
 use niri_config::{
-    BackgroundEffect, BlockOutFrom, BorderRule, CornerRadius, FloatingPosition, PresetSize,
-    ResolvedPopupsRules, ShadowRule, TabIndicatorRule,
+    BackgroundEffect, BlockOutFrom, BorderRule, CornerRadius, FloatingPosition, FocusAnimationPart,
+    PresetSize, ResolvedPopupsRules, ShadowRule, TabIndicatorRule,
 };
 use niri_ipc::ColumnDisplay;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -131,6 +131,9 @@ pub struct ResolvedWindowRules {
 
     /// Rules for this window's popups.
     pub popups: ResolvedPopupsRules,
+
+    /// Optional per-window focus animation overrides.
+    pub focus_animation: Option<FocusAnimationPart>,
 }
 
 impl<'a> WindowRef<'a> {
@@ -321,6 +324,13 @@ impl ResolvedWindowRules {
                     .merge_with(&rule.background_effect);
 
                 resolved.popups.merge_with(&rule.popups);
+
+                if let Some(fa) = &rule.focus_animation {
+                    resolved
+                        .focus_animation
+                        .get_or_insert_with(FocusAnimationPart::default)
+                        .merge_with(fa);
+                }
             }
 
             resolved.open_on_output = open_on_output.into_iter().flatten().cloned().collect();

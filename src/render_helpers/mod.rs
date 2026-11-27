@@ -51,6 +51,8 @@ pub mod snapshot;
 pub mod solid_color;
 pub mod surface;
 pub mod texture;
+pub mod tile_focus;
+pub mod workspace_3d;
 pub mod xray;
 
 /// A rendering context.
